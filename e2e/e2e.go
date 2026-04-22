@@ -11,8 +11,8 @@ import (
 	"github.com/krateoplatformops/plumbing/env"
 	"github.com/krateoplatformops/plumbing/jwtutil"
 	"github.com/krateoplatformops/plumbing/kubeconfig"
+	"github.com/krateoplatformops/plumbing/logger"
 	"github.com/krateoplatformops/plumbing/signup"
-	"github.com/krateoplatformops/plumbing/slogs/pretty"
 
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/types"
@@ -20,24 +20,7 @@ import (
 )
 
 func Logger(traceId string) types.StepFunc {
-	logLevel := slog.LevelInfo
-	if env.True("DEBUG") {
-		logLevel = slog.LevelDebug
-	}
-
-	var handler slog.Handler
-	if env.TestMode() {
-		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
-	} else {
-		handler = pretty.New(&slog.HandlerOptions{
-			Level:     logLevel,
-			AddSource: false,
-		},
-			pretty.WithDestinationWriter(os.Stdout),
-			pretty.WithColor(),
-			pretty.WithOutputEmptyAttrs(),
-		)
-	}
+	handler := logger.NewHandler(env.True("DEBUG"), os.Stderr)
 
 	return func(ctx context.Context, _ *testing.T, _ *envconf.Config) context.Context {
 		return xcontext.BuildContext(ctx,
