@@ -4,11 +4,13 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,12 +22,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 	"sigs.k8s.io/e2e-framework/support/kind"
+	"sigs.k8s.io/kustomize/kyaml/kio"
 )
 
 var (
@@ -47,8 +53,8 @@ func TestMain(m *testing.M) {
 		envfuncs.CreateCluster(kind.NewProvider(), clusterName),
 		envfuncs.CreateNamespace(namespace),
 	).Finish(
-		envfuncs.DeleteNamespace(namespace),
-		envfuncs.DestroyCluster(clusterName),
+	// envfuncs.DeleteNamespace(namespace),
+	// envfuncs.DestroyCluster(clusterName),
 	)
 
 	os.Exit(testenv.Run(m))
@@ -617,4 +623,342 @@ func TestInstallAndUninstall_TGZ(t *testing.T) {
 		Feature()
 
 	testenv.Test(t, f)
+}
+
+func TestFullStackAppRedisUpgrade(t *testing.T) {
+	os.Setenv("DEBUG", "0")
+
+	f := features.New("Upgrade Full Stack App").
+		Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+			// 0. Create demo-system namespace
+			_ = exec.Command("kubectl", "--kubeconfig", c.KubeconfigFile(), "create", "namespace", "demo-system").Run()
+
+			// 1. Install frontend-chart CRDs
+			tmpDir := t.TempDir()
+			cmd := exec.Command("git", "clone", "--depth", "1", "https://github.com/krateoplatformops/frontend-chart.git", tmpDir)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "failed to clone frontend-chart: %s", string(out))
+
+			crdsDir := filepath.Join(tmpDir, "crd-chart", "templates")
+			cmd = exec.Command("kubectl", "--kubeconfig", c.KubeconfigFile(), "apply", "-f", crdsDir)
+			out, err = cmd.CombinedOutput()
+			require.NoError(t, err, "failed to apply CRDs: %s", string(out))
+
+			// 2. Initialize Helm Client for Setup
+			cli, err := NewClient(c.Client().RESTConfig(), WithCache())
+			require.NoError(t, err)
+			defer cli.Close()
+
+			// 3. Install Redis Operator
+			t.Log("Installing Redis Operator")
+			_, err = cli.Install(ctx, "redis-operator", "https://ot-container-kit.github.io/helm-charts", &helmconfig.InstallConfig{
+				Namespace:       "ot-operators",
+				CreateNamespace: true,
+				ActionConfig: &helmconfig.ActionConfig{
+					ChartName: "redis-operator",
+					// Wait:      true,
+					// Timeout:   120 * time.Second,
+				},
+			})
+			require.NoError(t, err)
+
+			// 4. Install CNPG Operator
+			t.Log("Installing CNPG Operator")
+			_, err = cli.Install(ctx, "cnpg", "https://cloudnative-pg.github.io/charts", &helmconfig.InstallConfig{
+				ActionConfig: &helmconfig.ActionConfig{
+					ChartName:    "cloudnative-pg",
+					ChartVersion: "0.27.1",
+					Wait:         true,
+					Timeout:      15 * time.Minute,
+				},
+			})
+			require.NoError(t, err)
+
+			// 5. Install PG Cluster
+			t.Log("Installing PG Cluster")
+			_, err = cli.Install(ctx, "pg-cluster", "https://cloudnative-pg.github.io/charts", &helmconfig.InstallConfig{
+				ActionConfig: &helmconfig.ActionConfig{
+					ChartName:    "cluster",
+					ChartVersion: "0.5.0",
+					// Wait:         true,
+					// Timeout:      15 * time.Minute,
+					Values: map[string]interface{}{
+						"fullnameOverride": "pg-cluster",
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			// 6. Install Snowplow
+			t.Log("Installing Snowplow")
+			_, err = cli.Install(ctx, "snowplow", "https://charts.krateo.io", &helmconfig.InstallConfig{
+				ActionConfig: &helmconfig.ActionConfig{
+					ChartName:    "snowplow",
+					ChartVersion: "0.20.6",
+					// Wait:         true,
+					// Timeout:      15 * time.Minute,
+					Values: map[string]interface{}{
+						"image": map[string]interface{}{
+							"repository": "ghcr.io/krateoplatformops/snowplow",
+							"pullPolicy": "IfNotPresent",
+						},
+						"service": map[string]interface{}{
+							"type":     "NodePort",
+							"nodePort": 30081,
+						},
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			return ctx
+		}).
+		Assess("Install with Redis enabled, then upgrade with Redis disabled", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+			cli, err := NewClient(c.Client().RESTConfig(),
+				WithCache(),
+				WithNamespace(namespace),
+			)
+			require.NoError(t, err)
+			defer cli.Close()
+
+			chartRef := "https://marketplace.krateo.io"
+			chartName := "full-stack-app"
+			chartVersion := "0.0.15"
+			releaseName := "test-redis-upgrade"
+
+			// 1. Install with Redis enabled
+			t.Log("Installing with Redis enabled")
+			_, err = cli.Install(
+				ctx,
+				releaseName,
+				chartRef,
+				&helmconfig.InstallConfig{
+					ActionConfig: &helmconfig.ActionConfig{
+						ChartName:     chartName,
+						ChartVersion:  chartVersion,
+						TakeOwnership: true,
+						Verbose:       true,
+						Values: map[string]interface{}{
+							"app": map[string]interface{}{
+								"backend": map[string]interface{}{
+									"healthPath": "/api/health",
+									"image": map[string]interface{}{
+										"repository": "ghcr.io/krateoplatformops-blueprints/pixel-grid-backend",
+										"tag":        "latest",
+									},
+									"port": 8080,
+									"service": map[string]interface{}{
+										"port": 30098,
+										"type": "NodePort",
+									},
+								},
+								"cnpg": map[string]interface{}{
+									"clusterName":     "pg-cluster",
+									"instances":       3,
+									"postgresVersion": "18",
+									"storage": map[string]interface{}{
+										"size": "1Gi",
+									},
+								},
+								"frontend": map[string]interface{}{
+									"image": map[string]interface{}{
+										"repository": "ghcr.io/krateoplatformops-blueprints/pixel-grid-frontend",
+										"tag":        "latest",
+									},
+									"port": 8080,
+									"service": map[string]interface{}{
+										"port": 30099,
+										"type": "NodePort",
+									},
+								},
+								"redis": map[string]interface{}{
+									"enabled": true,
+									"image":   "quay.io/opstree/redis:v7.4.8",
+									"storage": "1Gi",
+								},
+							},
+							"global": map[string]interface{}{
+								"compositionApiVersion":       "composition.krateo.io/v0-0-15",
+								"compositionGroup":            "composition.krateo.io",
+								"compositionId":               "7c9b5120-9996-4911-a03b-7cca5087dd48",
+								"compositionInstalledVersion": "v0-0-15",
+								"compositionKind":             "FullStackApp",
+								"compositionName":             "fsa-1",
+								"compositionNamespace":        "demo-system",
+								"compositionResource":         "fullstackapps",
+								"gracefullyPaused":            "false",
+								"krateoNamespace":             "krateo-system",
+							},
+							"testing": map[string]interface{}{
+								"loadTesting": map[string]interface{}{
+									"enabled":     false,
+									"schedule":    "*/5 * * * *",
+									"scriptImage": "ghcr.io/krateoplatformops-blueprints/pixel-grid-load-test:latest",
+								},
+							},
+						},
+						PostRenderer: &MyPostRenderer{},
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			// Verify that Redis Operator is installed
+			redisOperatorObj := &unstructured.Unstructured{}
+			redisOperatorObj.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "redis.redis.opstreelabs.in",
+				Version: "v1beta2",
+				Kind:    "Redis",
+			})
+			err = c.Client().Resources().Get(ctx, releaseName+"-redis", namespace, redisOperatorObj)
+			require.NoError(t, err, "Redis CR should exist after install")
+
+			// defer func() {
+			// 	_ = cli.Uninstall(ctx, releaseName, &helmconfig.UninstallConfig{IgnoreNotFound: true})
+			// }()
+
+			// Optional: verify it is there first
+			redisObj := &unstructured.Unstructured{}
+			redisObj.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "redis.redis.opstreelabs.in",
+				Version: "v1beta2",
+				Kind:    "Redis",
+			})
+			err = c.Client().Resources().Get(ctx, releaseName+"-redis", namespace, redisObj)
+			require.NoError(t, err, "Redis CR should exist after install")
+
+			// 			type PostRenderer interface {
+			// 	// Run expects the rendered manifests and returns modified manifests
+			// 	Run(renderedManifests *bytes.Buffer) (*bytes.Buffer, error)
+			// }
+			// 2. Upgrade with Redis disabled
+			t.Log("Upgrading with Redis disabled")
+
+			logFile, err := os.Create("helm-upgrade.log")
+			require.NoError(t, err)
+			defer logFile.Close()
+
+			_, err = cli.Upgrade(
+				ctx,
+				releaseName,
+				chartRef,
+				&helmconfig.UpgradeConfig{
+					ActionConfig: &helmconfig.ActionConfig{
+						ChartName:     chartName,
+						ChartVersion:  chartVersion,
+						TakeOwnership: true,
+						Verbose:       true,
+						LogWriter:     logFile,
+						DryRun:        helmconfig.DryRunServer,
+						Values: map[string]interface{}{
+							"app": map[string]interface{}{
+								"backend": map[string]interface{}{
+									"healthPath": "/api/health",
+									"image": map[string]interface{}{
+										"repository": "ghcr.io/krateoplatformops-blueprints/pixel-grid-backend",
+										"tag":        "latest",
+									},
+									"port": 8080,
+									"service": map[string]interface{}{
+										"port": 30098,
+										"type": "NodePort",
+									},
+								},
+								"cnpg": map[string]interface{}{
+									"clusterName":     "pg-cluster",
+									"instances":       3,
+									"postgresVersion": "18",
+									"storage": map[string]interface{}{
+										"size": "1Gi",
+									},
+								},
+								"frontend": map[string]interface{}{
+									"image": map[string]interface{}{
+										"repository": "ghcr.io/krateoplatformops-blueprints/pixel-grid-frontend",
+										"tag":        "latest",
+									},
+									"port": 8080,
+									"service": map[string]interface{}{
+										"port": 30099,
+										"type": "NodePort",
+									},
+								},
+								"redis": map[string]interface{}{
+									"enabled": false,
+									"image":   "quay.io/opstree/redis:v7.4.8",
+									"storage": "1Gi",
+								},
+							},
+							"global": map[string]interface{}{
+								"compositionApiVersion":       "composition.krateo.io/v0-0-15",
+								"compositionGroup":            "composition.krateo.io",
+								"compositionId":               "7c9b5120-9996-4911-a03b-7cca5087dd48",
+								"compositionInstalledVersion": "v0-0-15",
+								"compositionKind":             "FullStackApp",
+								"compositionName":             "fsa-1",
+								"compositionNamespace":        "demo-system",
+								"compositionResource":         "fullstackapps",
+								"gracefullyPaused":            "false",
+								"krateoNamespace":             "krateo-system",
+							},
+							"testing": map[string]interface{}{
+								"loadTesting": map[string]interface{}{
+									"enabled":     false,
+									"schedule":    "*/5 * * * *",
+									"scriptImage": "ghcr.io/krateoplatformops-blueprints/pixel-grid-load-test:latest",
+								},
+							},
+						},
+						PostRenderer: &MyPostRenderer{},
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			// 3. Verify Redis CR is deleted
+			err = c.Client().Resources().Get(ctx, releaseName+"-redis", namespace, redisObj)
+			assert.Error(t, err, "Expected an error because Redis CR should be deleted")
+			if err != nil {
+				assert.True(t, kerrors.IsNotFound(err), "Error should be IsNotFound")
+			}
+
+			return ctx
+		}).
+		Feature()
+
+	testenv.Test(t, f)
+}
+
+type MyPostRenderer struct {
+}
+
+func (r *MyPostRenderer) Run(renderedManifests *bytes.Buffer) (*bytes.Buffer, error) {
+	// Write three sample labels
+	nodes, err := kio.FromBytes(renderedManifests.Bytes())
+	if err != nil {
+		return renderedManifests, fmt.Errorf("failed to parse rendered manifests: %w", err)
+	}
+	for _, v := range nodes {
+		labels := v.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		// your labels
+		labels["krateo.io/composition-id"] = "7c9b5120-9996-4911-a03b-7cca5087dd48"
+		labels["krateo.io/composition-group"] = "composition.krateo.io"
+		labels["krateo.io/composition-installed-version"] = "v0-0-15"
+		labels["krateo.io/composition-resource"] = "fullstackapps"
+		labels["krateo.io/composition-name"] = "fsa-1"
+		labels["krateo.io/composition-namespace"] = "demo-system"
+		labels["krateo.io/composition-kind"] = "FullStackApp"
+		labels["krateo.io/krateo-namespace"] = "krateo-system"
+		v.SetLabels(labels)
+	}
+
+	str, err := kio.StringAll(nodes)
+	if err != nil {
+		return renderedManifests, fmt.Errorf("failed to convert nodes to string: %w", err)
+	}
+
+	return bytes.NewBufferString(str), nil
 }

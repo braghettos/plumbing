@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"k8s.io/client-go/rest"
@@ -116,6 +117,8 @@ type ActionConfig struct {
 	Username           string
 	Password           string
 	PassCredentialsAll bool
+	Verbose            bool
+	LogWriter          io.Writer
 }
 
 type GetConfig struct {

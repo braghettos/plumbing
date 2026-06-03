@@ -29,9 +29,11 @@ func Get(ctx context.Context, uri string, opts ...Option) (io.Reader, string, er
 		opt(&o)
 	}
 
+	key := cacheKey(o.URI, o.Repo)
+
 	// Check cache first
 	if o.Cache != nil {
-		if data, ok := o.Cache.Get(o.URI, o.Version); ok {
+		if data, ok := o.Cache.Get(key, o.Version); ok {
 			return data, o.Version, nil
 		}
 	}
@@ -51,23 +53,41 @@ func Get(ctx context.Context, uri string, opts ...Option) (io.Reader, string, er
 		return nil, "", fmt.Errorf("%w: uri '%s'", ErrNoHandler, o.URI)
 	}
 
-	b, uri, err := g.Get(ctx, o)
+	b, resolvedURI, err := g.Get(ctx, o)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get %s: %w", o.URI, err)
 	}
-	// Store in cache
+
 	if o.Cache != nil {
-		err = o.Cache.Set(o.URI, o.Version, b)
-		if err != nil {
+		if err := o.Cache.Set(key, o.Version, b); err != nil {
 			return nil, "", fmt.Errorf("failed to cache %s: %w", o.URI, err)
 		}
-		// Reset the pointer to the beginning so the caller can read it
-		if seeker, ok := b.(io.Seeker); ok {
-			seeker.Seek(0, io.SeekStart)
+		// Source reader may own network resources (OCI streams from repo.Fetch).
+		// Close it: cache.Set has already drained the bytes onto disk.
+		if c, ok := b.(io.Closer); ok {
+			_ = c.Close()
 		}
+		// Re-open the entry from the cache so the caller receives a fresh,
+		// readable stream regardless of whether b was seekable. This avoids the
+		// silent empty-stream bug when b is a non-seekable OCI reader.
+		cached, ok := o.Cache.Get(key, o.Version)
+		if !ok {
+			return nil, "", fmt.Errorf("cache evicted right after Set for %s", o.URI)
+		}
+		return cached, resolvedURI, nil
 	}
 
-	return b, uri, nil
+	return b, resolvedURI, nil
+}
+
+// cacheKey combines the registry URI with the chart name (Repo) so that two
+// requests sharing URI+Version but referencing different charts get distinct
+// cache entries. The null byte separator cannot appear in either component.
+func cacheKey(uri, repo string) string {
+	if repo == "" {
+		return uri
+	}
+	return uri + "\x00" + repo
 }
 
 func fetch(ctx context.Context, opts GetOptions) (io.Reader, error) {

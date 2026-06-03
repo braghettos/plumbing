@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"github.com/krateoplatformops/plumbing/helm/getter/cache"
+	"github.com/krateoplatformops/plumbing/helm/v3/tracer"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/storage/driver"
@@ -21,7 +23,6 @@ var _ helmconfig.Client = (*client)(nil)
 
 type client struct {
 	settings          *cli.EnvSettings
-	actionConfig      *action.Configuration
 	namespace         string
 	restConfig        *rest.Config
 	cache             *cache.DiskCache
@@ -52,26 +53,24 @@ func NewClient(cfg *rest.Config, opts ...ClientOption) (*client, error) {
 		}
 	}
 
-	// Initialize Helm action configuration
-	actionConfig := new(action.Configuration)
+	// Sanity check: fail fast at construction if the storage driver / discovery
+	// can't be initialized. The actionConfig itself is discarded; every operation
+	// builds its own via newActionConfig to keep the client safe under concurrency.
+	probe := new(action.Configuration)
 	driver := os.Getenv("HELM_DRIVER")
-
-	// Discard logger by default
-	debugLog := func(format string, v ...interface{}) {
+	probeLog := func(format string, v ...interface{}) {
 		slog.Debug(fmt.Sprintf(format, v...))
 	}
-
-	var clientGetter *RESTClientGetter
+	var probeGetter *RESTClientGetter
 	if c.cachedClients != nil {
-		clientGetter = NewRESTClientGetterWithCachedClients(c.namespace, nil, c.restConfig, c.cachedClients)
+		probeGetter = NewRESTClientGetterWithCachedClients(c.namespace, nil, c.restConfig, c.cachedClients)
 	} else {
-		clientGetter = NewRESTClientGetter(c.namespace, nil, c.restConfig)
+		probeGetter = NewRESTClientGetter(c.namespace, nil, c.restConfig)
 	}
-	if err := actionConfig.Init(clientGetter, c.namespace, driver, debugLog); err != nil {
+	if err := probe.Init(probeGetter, c.namespace, driver, probeLog); err != nil {
 		return nil, fmt.Errorf("failed to init action config: %w", err)
 	}
 
-	c.actionConfig = actionConfig
 	return c, nil
 }
 
@@ -175,7 +174,7 @@ func (c *client) Install(ctx context.Context, releaseName string, chartRef strin
 		restCfg = cfg.RestConfig
 	}
 
-	actionConfig, err := c.newActionConfig(namespace, restCfg)
+	actionConfig, err := c.newActionConfig(ctx, namespace, restCfg, cfg.ActionConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -184,9 +183,21 @@ func (c *client) Install(ctx context.Context, releaseName string, chartRef strin
 }
 
 func (c *client) Upgrade(ctx context.Context, releaseName, chartRef string, cfg *helmconfig.UpgradeConfig) (*helmconfig.Release, error) {
-	upgradeClient := action.NewUpgrade(c.actionConfig)
+	if cfg == nil {
+		cfg = &helmconfig.UpgradeConfig{}
+	}
+	if cfg.ActionConfig == nil {
+		cfg.ActionConfig = &helmconfig.ActionConfig{}
+	}
+
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, cfg.ActionConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	upgradeClient := action.NewUpgrade(actionConfig)
 	applyUpgradeConfig(upgradeClient, c.namespace, cfg)
-	upgradeClient.PostRenderer = withDuplicateResourceValidation(cfg.PostRenderer, c.actionConfig.KubeClient)
+	upgradeClient.PostRenderer = withDuplicateResourceValidation(cfg.PostRenderer, actionConfig.KubeClient)
 
 	chart, err := c.loadChart(ctx, chartRef, c.buildGetterOpts(cfg.ActionConfig))
 	if err != nil {
@@ -210,10 +221,15 @@ func (c *client) Upgrade(ctx context.Context, releaseName, chartRef string, cfg 
 }
 
 func (c *client) Uninstall(ctx context.Context, releaseName string, cfg *helmconfig.UninstallConfig) error {
-	cmd := action.NewUninstall(c.actionConfig)
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return err
+	}
+
+	cmd := action.NewUninstall(actionConfig)
 	applyUninstallConfig(cmd, cfg)
 
-	_, err := cmd.Run(releaseName)
+	_, err = cmd.Run(releaseName)
 	if err != nil {
 		return fmt.Errorf("uninstall failed: %w", err)
 	}
@@ -222,10 +238,15 @@ func (c *client) Uninstall(ctx context.Context, releaseName string, cfg *helmcon
 }
 
 func (c *client) Rollback(ctx context.Context, releaseName string, cfg *helmconfig.RollbackConfig) (*helmconfig.Release, error) {
-	rollbackClient := action.NewRollback(c.actionConfig)
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rollbackClient := action.NewRollback(actionConfig)
 	applyRollbackConfig(rollbackClient, cfg)
 
-	err := rollbackClient.Run(releaseName)
+	err = rollbackClient.Run(releaseName)
 	if err != nil {
 		return nil, fmt.Errorf("rollback failed: %w", err)
 	}
@@ -269,7 +290,7 @@ func (c *client) install(ctx context.Context, namespace, releaseName, chartRef s
 	return toWrapperRelease(rel), nil
 }
 
-func (c *client) newActionConfig(namespace string, restCfg *rest.Config) (*action.Configuration, error) {
+func (c *client) newActionConfig(ctx context.Context, namespace string, restCfg *rest.Config, actionCfg *helmconfig.ActionConfig) (*action.Configuration, error) {
 	actionConfig := new(action.Configuration)
 	driver := os.Getenv("HELM_DRIVER")
 
@@ -283,6 +304,17 @@ func (c *client) newActionConfig(namespace string, restCfg *rest.Config) (*actio
 	cfgToUse := restCfg
 	if cfgToUse == nil {
 		cfgToUse = c.restConfig
+	}
+
+	if actionCfg != nil && actionCfg.Verbose {
+		cfgToUse = rest.CopyConfig(cfgToUse)
+		t := tracer.NewTracer(ctx, true)
+		if actionCfg.LogWriter != nil {
+			t = t.WithWriter(actionCfg.LogWriter)
+		}
+		cfgToUse.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+			return t.WithRoundTripper(rt)
+		})
 	}
 
 	var clientGetter *RESTClientGetter
@@ -299,7 +331,12 @@ func (c *client) newActionConfig(namespace string, restCfg *rest.Config) (*actio
 }
 
 func (c *client) GetRelease(ctx context.Context, releaseName string, cfg *helmconfig.GetConfig) (*helmconfig.Release, error) {
-	getClient := action.NewGet(c.actionConfig)
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	getClient := action.NewGet(actionConfig)
 	applyGetConfig(getClient, cfg)
 
 	rel, err := getClient.Run(releaseName)
@@ -314,7 +351,12 @@ func (c *client) GetRelease(ctx context.Context, releaseName string, cfg *helmco
 }
 
 func (c *client) ListReleases(ctx context.Context, cfg *helmconfig.ListConfig) ([]*helmconfig.Release, error) {
-	listClient := action.NewList(c.actionConfig)
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	listClient := action.NewList(actionConfig)
 	applyListConfig(listClient, cfg)
 
 	helmReleases, err := listClient.Run()
