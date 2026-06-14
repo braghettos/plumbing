@@ -309,10 +309,14 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 			st.AddLineComment("+kubebuilder:title:=%s", prop.Title)
 		}
 		if prop.Default != nil {
-			st.AddLineComment("+kubebuilder:default:=%s", stringsutils.DefaultValForKubebuilder(prop.Default))
+			if dv := stringsutils.DefaultValForKubebuilder(prop.Default); dv != "" {
+				st.AddLineComment("+kubebuilder:default:=%s", dv)
+			}
 		}
 		if prop.Examples != nil {
-			st.AddLineComment("+kubebuilder:example:=%s", stringsutils.ExampleValForKubebuilder(prop.Examples))
+			if ev := stringsutils.ExampleValForKubebuilder(prop.Examples); ev != "" {
+				st.AddLineComment("+kubebuilder:example:=%s", ev)
+			}
 		}
 
 		if prop.Minimum != nil {

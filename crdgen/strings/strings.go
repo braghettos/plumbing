@@ -1,9 +1,9 @@
 package strings
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 )
 
@@ -63,79 +63,52 @@ func StrVal(v any) string {
 	}
 }
 
-func DefaultValForKubebuilder(def any) string {
-	switch v := def.(type) {
-	case []any:
-		// Empty array default must render as `{}` (empty list), NOT `{""}` (a one-element string
-		// list) which yields an invalid CRD for object-item arrays (default.[0] must be object).
-		// Elements formatted by type via formatMapValue (objects -> object literal, strings -> quoted).
-		if len(v) == 0 {
-			return "{}"
-		}
-		parts := make([]string, len(v))
-		for i, item := range v {
-			parts[i] = formatMapValue(item)
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ","))
-	case []string:
-		if len(v) == 0 {
-			return "{}"
-		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
-	case map[string]any:
-		// Sort by keys for a stable output
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+// DefaultValForKubebuilder renders a JSON-Schema default into a +kubebuilder:default:= marker
+// value, OR returns "" when controller-gen's marker DSL cannot express the value (objects and
+// arrays-containing-objects). controller-gen parses `{...}` as a LIST of scalars; it has no syntax
+// for object/struct defaults, so emitting one produces an invalid CRD. Callers must skip the marker
+// when this returns "". The source values.schema.json keeps the full default regardless — this only
+// governs what lands in the generated CRD.
+func DefaultValForKubebuilder(def any) string { return markerVal(def) }
 
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = fmt.Sprintf("%s: %v", k, formatMapValue(v[k]))
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
-	case string:
-		return fmt.Sprintf("%q", v)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
+// ExampleValForKubebuilder mirrors DefaultValForKubebuilder for +kubebuilder:example:= markers.
+func ExampleValForKubebuilder(ex any) string { return markerVal(ex) }
 
-func ExampleValForKubebuilder(ex any) string {
-	switch v := ex.(type) {
-	case []any:
-		// Empty array default must render as `{}` (empty list), NOT `{""}` (a one-element string
-		// list) which yields an invalid CRD for object-item arrays (default.[0] must be object).
-		// Elements formatted by type via formatMapValue (objects -> object literal, strings -> quoted).
-		if len(v) == 0 {
-			return "{}"
-		}
-		parts := make([]string, len(v))
-		for i, item := range v {
-			parts[i] = formatMapValue(item)
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ","))
-	case []string:
-		if len(v) == 0 {
-			return "{}"
-		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
-	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = fmt.Sprintf("%s: %v", k, formatMapValue(v[k]))
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
+// markerVal returns a controller-gen-DSL value, or "" if unexpressible.
+func markerVal(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
 	case string:
-		return fmt.Sprintf("%q", v)
+		return fmt.Sprintf("%q", x)
+	case bool:
+		return fmt.Sprintf("%v", x)
+	case json.Number:
+		return x.String()
+	case float64, float32, int, int32, int64:
+		return fmt.Sprintf("%v", x)
+	case []any:
+		if len(x) == 0 {
+			return "{}" // empty list default
+		}
+		parts := make([]string, 0, len(x))
+		for _, e := range x {
+			m := markerVal(e)
+			if m == "" {
+				return "" // contains an unexpressible element (e.g. an object) -> omit whole default
+			}
+			parts = append(parts, m)
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	case []string:
+		if len(x) == 0 {
+			return "{}"
+		}
+		return `{"` + strings.Join(x, `","`) + `"}`
+	case map[string]any:
+		return "" // controller-gen has no object/struct default syntax
 	default:
-		return fmt.Sprintf("%v", v)
+		return ""
 	}
 }
 
