@@ -66,12 +66,21 @@ func StrVal(v any) string {
 func DefaultValForKubebuilder(def any) string {
 	switch v := def.(type) {
 	case []any:
-		strs := make([]string, len(v))
-		for i, item := range v {
-			strs[i] = fmt.Sprintf("%v", item)
+		// Empty array default must render as `{}` (empty list), NOT `{""}` (a one-element string
+		// list) which yields an invalid CRD for object-item arrays (default.[0] must be object).
+		// Elements formatted by type via formatMapValue (objects -> object literal, strings -> quoted).
+		if len(v) == 0 {
+			return "{}"
 		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(strs, `","`)+`"`)
+		parts := make([]string, len(v))
+		for i, item := range v {
+			parts[i] = formatMapValue(item)
+		}
+		return fmt.Sprintf("{%s}", strings.Join(parts, ","))
 	case []string:
+		if len(v) == 0 {
+			return "{}"
+		}
 		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
 	case map[string]any:
 		// Sort by keys for a stable output
@@ -96,12 +105,21 @@ func DefaultValForKubebuilder(def any) string {
 func ExampleValForKubebuilder(ex any) string {
 	switch v := ex.(type) {
 	case []any:
-		strs := make([]string, len(v))
-		for i, item := range v {
-			strs[i] = fmt.Sprintf("%v", item)
+		// Empty array default must render as `{}` (empty list), NOT `{""}` (a one-element string
+		// list) which yields an invalid CRD for object-item arrays (default.[0] must be object).
+		// Elements formatted by type via formatMapValue (objects -> object literal, strings -> quoted).
+		if len(v) == 0 {
+			return "{}"
 		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(strs, `","`)+`"`)
+		parts := make([]string, len(v))
+		for i, item := range v {
+			parts[i] = formatMapValue(item)
+		}
+		return fmt.Sprintf("{%s}", strings.Join(parts, ","))
 	case []string:
+		if len(v) == 0 {
+			return "{}"
+		}
 		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
 	case map[string]any:
 		keys := make([]string, 0, len(v))
