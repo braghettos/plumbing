@@ -309,10 +309,17 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 			st.AddLineComment("+kubebuilder:title:=%s", prop.Title)
 		}
 		if prop.Default != nil {
-			st.AddLineComment("+kubebuilder:default:=%s", stringsutils.DefaultValForKubebuilder(prop.Default))
+			// Emit the marker ONLY when controller-gen can express the default; markerVal
+			// returns "" for objects/object-arrays (unexpressible) -> omit, so the generated
+			// CRD stays valid (the chart's values.schema.json keeps the default for helm).
+			if dv := stringsutils.DefaultValForKubebuilder(prop.Default); dv != "" {
+				st.AddLineComment("+kubebuilder:default:=%s", dv)
+			}
 		}
 		if prop.Examples != nil {
-			st.AddLineComment("+kubebuilder:example:=%s", stringsutils.ExampleValForKubebuilder(prop.Examples))
+			if ev := stringsutils.ExampleValForKubebuilder(prop.Examples); ev != "" {
+				st.AddLineComment("+kubebuilder:example:=%s", ev)
+			}
 		}
 
 		if prop.Minimum != nil {

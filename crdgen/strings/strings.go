@@ -1,9 +1,9 @@
 package strings
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 )
 
@@ -63,78 +63,52 @@ func StrVal(v any) string {
 	}
 }
 
-func DefaultValForKubebuilder(def any) string {
-	switch v := def.(type) {
+// DefaultValForKubebuilder / ExampleValForKubebuilder render a schema default/example
+// as a controller-gen marker argument (+kubebuilder:default:= / example:=).
+func DefaultValForKubebuilder(def any) string { return markerVal(def) }
+func ExampleValForKubebuilder(ex any) string  { return markerVal(ex) }
+
+// markerVal renders v as a controller-gen marker argument. controller-gen's marker DSL
+// can express scalars and scalar LISTS ({a,b}) only — it has NO syntax for object or
+// object-array defaults ({k:v} is parsed as a scalar list start and fails; an empty
+// array default must be {} not {""}). So markerVal returns "" for anything controller-gen
+// cannot express (objects, arrays-containing-objects), and the caller OMITS the marker.
+// This is the fix for the array/object-default CRD-gen failure (see the core-provider
+// crdgen-array-default fix shipped as braghettos/plumbing v1.7.6, here on the v1.6.x line).
+func markerVal(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return fmt.Sprintf("%q", x)
+	case bool:
+		return fmt.Sprintf("%v", x)
+	case json.Number:
+		return x.String()
+	case float64, float32, int, int32, int64:
+		return fmt.Sprintf("%v", x)
 	case []any:
-		strs := make([]string, len(v))
-		for i, item := range v {
-			strs[i] = fmt.Sprintf("%v", item)
+		if len(x) == 0 {
+			return "{}" // empty array default -> {} (NOT {""})
 		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(strs, `","`)+`"`)
+		parts := make([]string, 0, len(x))
+		for _, e := range x {
+			m := markerVal(e)
+			if m == "" { // an element controller-gen can't express -> omit the whole default
+				return ""
+			}
+			parts = append(parts, m)
+		}
+		return "{" + strings.Join(parts, ",") + "}"
 	case []string:
-		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
+		if len(x) == 0 {
+			return "{}"
+		}
+		return `{"` + strings.Join(x, `","`) + `"}`
 	case map[string]any:
-		// Sort by keys for a stable output
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = fmt.Sprintf("%s: %v", k, formatMapValue(v[k]))
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
-	case string:
-		return fmt.Sprintf("%q", v)
+		return "" // controller-gen has no object/struct default syntax
 	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-func ExampleValForKubebuilder(ex any) string {
-	switch v := ex.(type) {
-	case []any:
-		strs := make([]string, len(v))
-		for i, item := range v {
-			strs[i] = fmt.Sprintf("%v", item)
-		}
-		return fmt.Sprintf("{%s}", `"`+strings.Join(strs, `","`)+`"`)
-	case []string:
-		return fmt.Sprintf("{%s}", `"`+strings.Join(v, `","`)+`"`)
-	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = fmt.Sprintf("%s: %v", k, formatMapValue(v[k]))
-		}
-		return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
-	case string:
-		return fmt.Sprintf("%q", v)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-func formatMapValue(v any) string {
-	switch val := v.(type) {
-	case string:
-		return fmt.Sprintf("%q", val)
-	case []any:
-		strs := make([]string, len(val))
-		for i, item := range val {
-			strs[i] = fmt.Sprintf("%v", item)
-		}
-		return fmt.Sprintf("{%s}", strings.Join(strs, ","))
-	case map[string]any:
-		return DefaultValForKubebuilder(val)
-	default:
-		return fmt.Sprintf("%v", val)
+		return ""
 	}
 }
 
