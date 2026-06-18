@@ -1,0 +1,81 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: hellos.test.krateo.io
+spec:
+  group: test.krateo.io
+  names:
+    categories:
+    - krateo
+    - test
+    - hello
+    kind: Hello
+    listKind: HelloList
+    plural: hellos
+    singular: hello
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v0-0-0
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              bio:
+                description: Optional short biography
+                maxLength: 160
+                type: string
+              pin:
+                description: Fixed length PIN
+                maxLength: 4
+                minLength: 4
+                type: string
+              profile:
+                properties:
+                  nickname:
+                    description: Public nickname
+                    maxLength: 30
+                    minLength: 1
+                    type: string
+                type: object
+              username:
+                description: User name with bounded length
+                maxLength: 20
+                minLength: 3
+                type: string
+            required:
+            - pin
+            - username
+            type: object
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

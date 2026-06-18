@@ -1,0 +1,30 @@
+{
+  "title": "Hello Mixed Length Example",
+  "type": "object",
+  "properties": {
+    "username": {
+      "type": "string",
+      "description": "User name with direct string bounds",
+      "minLength": 3,
+      "maxLength": 20
+    },
+    "tags": {
+      "type": "array",
+      "description": "Tags with bounded item length",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 12
+      }
+    },
+    "note": {
+      "type": "string",
+      "description": "Optional short note",
+      "maxLength": 60
+    }
+  },
+  "required": [
+    "username",
+    "tags"
+  ]
+}

@@ -18,7 +18,7 @@ func TestGenTypes(t *testing.T) {
 }`
 	)
 
-	specSchemaBytes, err := os.ReadFile("../../testdata/git.spec.schema.json")
+	specSchemaBytes, err := os.ReadFile("../testdata/enum.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,10 +31,10 @@ func TestGenTypes(t *testing.T) {
 	statusSchemaBytes := []byte(preserveUnknownFields)
 
 	opts := Options{
-		Group:        "git.krateo.io",
+		Group:        "test.krateo.io",
 		Version:      "v1alpha1",
-		Kind:         "Repo",
-		Categories:   []string{"krateo", "git", "repo"},
+		Kind:         "Test",
+		Categories:   []string{"krateo", "test"},
 		SpecSchema:   specSchemaBytes,
 		StatusSchema: statusSchemaBytes,
 		Managed:      false,

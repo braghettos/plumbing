@@ -1,0 +1,26 @@
+{
+  "title": "Hello Array Length Example",
+  "type": "object",
+  "properties": {
+    "labels": {
+      "type": "array",
+      "description": "List of labels with bounded item length",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 10
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "description": "Optional aliases",
+      "items": {
+        "type": "string",
+        "maxLength": 8
+      }
+    }
+  },
+  "required": [
+    "labels"
+  ]
+}

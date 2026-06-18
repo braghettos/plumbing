@@ -7,6 +7,7 @@ import (
 
 func TestTTLCache(t *testing.T) {
 	c := NewTTL[string, int]()
+	defer c.Close()
 
 	c.Set("one", 1, 1*time.Second)
 	c.Set("two", 2, 2*time.Second)
@@ -40,4 +41,28 @@ func TestTTLCache(t *testing.T) {
 	c.Remove("three")
 
 	c.Clear()
+}
+
+func TestTTLCacheEvictsLeastRecentlyUsedWhenMaxEntriesIsReached(t *testing.T) {
+	c := NewTTL[string, int](WithMaxEntries(2), WithCleanupInterval(0))
+	defer c.Close()
+
+	c.Set("one", 1, time.Minute)
+	c.Set("two", 2, time.Minute)
+
+	if _, found := c.Get("one"); !found {
+		t.Fatal("key 'one' should be present")
+	}
+
+	c.Set("three", 3, time.Minute)
+
+	if _, found := c.Get("two"); found {
+		t.Fatal("key 'two' should have been evicted as least recently used")
+	}
+	if _, found := c.Get("one"); !found {
+		t.Fatal("key 'one' should still be present")
+	}
+	if _, found := c.Get("three"); !found {
+		t.Fatal("key 'three' should still be present")
+	}
 }

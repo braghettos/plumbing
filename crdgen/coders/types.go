@@ -331,6 +331,8 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 			st.AddLineComment("+kubebuilder:validation:Pattern=`%s`", prop.Pattern)
 		}
 
+		addLengthValidationMarkers(st, prop, "")
+
 		if prop.Format != "" {
 			st.AddLineComment("+kubebuilder:validation:Format=%s", prop.Format)
 		}
@@ -395,8 +397,14 @@ func (co *typesCoder) resolveType(typeName string, t *schemas.Type) string {
 	}
 
 	// enum
-	if t.Type.Equals(schemas.TypeList{"string"}) && len(t.Enum) > 0 {
-		return co.emitEnum(typeName, t)
+	if len(t.Enum) > 0 {
+		if t.Type.Equals(schemas.TypeList{"string"}) {
+			return co.emitEnum(typeName, "string", t)
+		}
+
+		if t.Type.Equals(schemas.TypeList{"integer"}) {
+			return co.emitEnum(typeName, "int", t)
+		}
 	}
 
 	// array
@@ -422,7 +430,7 @@ func (co *typesCoder) resolveType(typeName string, t *schemas.Type) string {
 	return jsonSchemaToGoType(t)
 }
 
-func (co *typesCoder) emitEnum(typeName string, t *schemas.Type) string {
+func (co *typesCoder) emitEnum(typeName, typeAlias string, t *schemas.Type) string {
 	typeName = ptrutils.Deref(t.CrdgenIdentifierName, typeName)
 	if co.generatedEnums[typeName] {
 		typeName = stringsutils.RandomName("Enum", co.rng)
@@ -432,7 +440,7 @@ func (co *typesCoder) emitEnum(typeName string, t *schemas.Type) string {
 	if len(t.Enum) > 0 {
 		grp.AddLineComment("+kubebuilder:validation:Enum:=" + stringsutils.Join(t.Enum, ";"))
 	}
-	grp.AddTypeAlias(typeName, "string")
+	grp.AddTypeAlias(typeName, typeAlias)
 
 	consts := co.gen.NewGroup()
 	for _, e := range t.Enum {
@@ -442,7 +450,57 @@ func (co *typesCoder) emitEnum(typeName string, t *schemas.Type) string {
 		}
 	}
 
+	fmt.Println(consts)
 	co.generatedEnums[typeName] = true
 
 	return typeName
+}
+
+func addLengthValidationMarkers(st *gg.IStruct, t *schemas.Type, prefix string) {
+	if t == nil {
+		return
+	}
+
+	switch {
+	case isTypeOrNullable(t, "string"):
+		if t.MinLength > 0 {
+			st.AddLineComment("+kubebuilder:validation:%sMinLength=%s",
+				prefix, stringsutils.StrVal(t.MinLength))
+		}
+		if t.MaxLength > 0 {
+			st.AddLineComment("+kubebuilder:validation:%sMaxLength=%s",
+				prefix, stringsutils.StrVal(t.MaxLength))
+		}
+	case isTypeOrNullable(t, "array"):
+		addLengthValidationMarkers(st, t.Items, prefix+"items:")
+	}
+}
+
+func isTypeOrNullable(t *schemas.Type, wanted string) bool {
+	if t == nil {
+		return false
+	}
+
+	types := t.Type
+	if len(types) == 1 {
+		return types[0] == wanted
+	}
+
+	if len(types) == 2 {
+		hasWanted := false
+		hasNull := false
+
+		for _, typ := range types {
+			if typ == wanted {
+				hasWanted = true
+			}
+			if typ == "null" {
+				hasNull = true
+			}
+		}
+
+		return hasWanted && hasNull
+	}
+
+	return false
 }

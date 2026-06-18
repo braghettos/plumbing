@@ -15,6 +15,14 @@
       "url": {
         "type": "string",
         "default": "https://krateo.io"
+      },
+      "stringNum": {
+        "type": "string",
+        "default": "123abc"
+      },
+      "stringNum2": {
+        "type": "string",
+        "default": "123"
       }
     },
     "required": [

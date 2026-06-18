@@ -34,6 +34,8 @@ func schemaAsType(s *schemas.Schema) *schemas.Type {
 		Minimum:              s.Minimum,
 		Maximum:              s.Maximum,
 		MultipleOf:           s.MultipleOf,
+		MaxLength:            s.MaxLength,
+		MinLength:            s.MinLength,
 		Pattern:              s.Pattern,
 		Definitions:          s.Definitions,
 		Ref:                  s.Ref,

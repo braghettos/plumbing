@@ -1,129 +1,175 @@
 package cache
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
 
-// item represents a cache item with a value and an expiration time.
 type item[V any] struct {
 	value  V
 	expiry time.Time
+	elem   *list.Element
 }
 
-// isExpired checks if the cache item has expired.
 func (i item[V]) isExpired() bool {
 	return time.Now().After(i.expiry)
 }
 
-// TTLCache is a generic cache implementation with support for time-to-live
-// (TTL) expiration.
-type TTLCache[K comparable, V any] struct {
-	items map[K]item[V] // The map storing cache items.
-	mu    sync.Mutex    // Mutex for controlling concurrent access to the cache.
+type ttlCacheOptions struct {
+	cleanupInterval time.Duration
+	maxEntries      int
 }
 
-// NewTTL creates a new TTLCache instance and starts a goroutine to periodically
-// remove expired items every 5 seconds.
-func NewTTL[K comparable, V any]() *TTLCache[K, V] {
-	c := &TTLCache[K, V]{
-		items: make(map[K]item[V]),
+type Option func(*ttlCacheOptions)
+
+func WithCleanupInterval(interval time.Duration) Option {
+	return func(opts *ttlCacheOptions) {
+		if interval >= 0 {
+			opts.cleanupInterval = interval
+		}
+	}
+}
+
+func WithMaxEntries(maxEntries int) Option {
+	return func(opts *ttlCacheOptions) {
+		if maxEntries >= 0 {
+			opts.maxEntries = maxEntries
+		}
+	}
+}
+
+type TTLCache[K comparable, V any] struct {
+	items      map[K]*item[V]
+	order      *list.List
+	mu         sync.Mutex
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	maxEntries int
+}
+
+func NewTTL[K comparable, V any](opts ...Option) *TTLCache[K, V] {
+	cfg := ttlCacheOptions{
+		cleanupInterval: 5 * time.Second,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
-	go func() {
-		for range time.Tick(5 * time.Second) {
-			c.mu.Lock()
+	c := &TTLCache[K, V]{
+		items:      make(map[K]*item[V]),
+		order:      list.New(),
+		stopCh:     make(chan struct{}),
+		maxEntries: cfg.maxEntries,
+	}
 
-			// Iterate over the cache items and delete expired ones.
-			for key, item := range c.items {
-				if item.isExpired() {
-					delete(c.items, key)
+	if cfg.cleanupInterval > 0 {
+		ticker := time.NewTicker(cfg.cleanupInterval)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					c.mu.Lock()
+					for key, entry := range c.items {
+						if entry.isExpired() {
+							c.removeEntry(key, entry)
+						}
+					}
+					c.mu.Unlock()
+				case <-c.stopCh:
+					return
 				}
 			}
-
-			c.mu.Unlock()
-		}
-	}()
+		}()
+	}
 
 	return c
 }
 
-// Set adds a new item to the cache with the specified key, value, and
-// time-to-live (TTL).
 func (c *TTLCache[K, V]) Set(key K, value V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.items[key] = item[V]{
+	if current, found := c.items[key]; found {
+		current.value = value
+		current.expiry = time.Now().Add(ttl)
+		c.order.MoveToFront(current.elem)
+		return
+	}
+
+	elem := c.order.PushFront(key)
+	c.items[key] = &item[V]{
 		value:  value,
 		expiry: time.Now().Add(ttl),
+		elem:   elem,
+	}
+
+	if c.maxEntries > 0 && len(c.items) > c.maxEntries {
+		c.evictOldest()
 	}
 }
 
-// Get retrieves the value associated with the given key from the cache.
 func (c *TTLCache[K, V]) Get(key K) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	item, found := c.items[key]
+	entry, found := c.items[key]
 	if !found {
-		// If the key is not found, return the zero value for V and false.
-		return item.value, false
+		var zero V
+		return zero, false
 	}
 
-	if item.isExpired() {
-		// If the item has expired, remove it from the cache and return the
-		// value and false.
-		delete(c.items, key)
-		return item.value, false
+	if entry.isExpired() {
+		val := entry.value
+		c.removeEntry(key, entry)
+		return val, false
 	}
 
-	// Otherwise return the value and true.
-	return item.value, true
+	c.order.MoveToFront(entry.elem)
+	return entry.value, true
 }
 
-// Remove removes the item with the specified key from the cache.
 func (c *TTLCache[K, V]) Remove(key K) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Delete the item with the given key from the cache.
-	delete(c.items, key)
+	if entry, found := c.items[key]; found {
+		c.removeEntry(key, entry)
+	}
 }
 
-// Pop removes and returns the item with the specified key from the cache.
 func (c *TTLCache[K, V]) Pop(key K) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	item, found := c.items[key]
+	entry, found := c.items[key]
 	if !found {
-		// If the key is not found, return the zero value for V and false.
-		return item.value, false
+		var zero V
+		return zero, false
 	}
 
-	// If the key is found, delete the item from the cache.
-	delete(c.items, key)
+	c.removeEntry(key, entry)
 
-	if item.isExpired() {
-		// If the item has expired, return the value and false.
-		return item.value, false
+	if entry.isExpired() {
+		return entry.value, false
 	}
 
-	// Otherwise return the value and true.
-	return item.value, true
+	return entry.value, true
 }
 
 func (c *TTLCache[K, V]) Keys() []K {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	all := make([]K, len(c.items))
+	all := make([]K, 0, len(c.items))
 
-	i := 0
-	for k := range c.items {
-		all[i] = k
-		i++
+	for key, entry := range c.items {
+		if entry.isExpired() {
+			c.removeEntry(key, entry)
+			continue
+		}
+		all = append(all, key)
 	}
 
 	return all
@@ -134,4 +180,27 @@ func (c *TTLCache[K, V]) Clear() {
 	defer c.mu.Unlock()
 
 	clear(c.items)
+	c.order.Init()
+}
+
+func (c *TTLCache[K, V]) Close() {
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
+}
+
+func (c *TTLCache[K, V]) removeEntry(key K, entry *item[V]) {
+	delete(c.items, key)
+	c.order.Remove(entry.elem)
+}
+
+func (c *TTLCache[K, V]) evictOldest() {
+	elem := c.order.Back()
+	if elem == nil {
+		return
+	}
+	key := elem.Value.(K)
+	if entry, found := c.items[key]; found {
+		c.removeEntry(key, entry)
+	}
 }

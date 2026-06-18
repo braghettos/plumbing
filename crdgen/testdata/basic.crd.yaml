@@ -51,6 +51,12 @@ spec:
                 type: integer
               greeting:
                 type: string
+              stringNum:
+                default: 123abc
+                type: string
+              stringNum2:
+                default: "123"
+                type: string
               url:
                 default: https://krateo.io
                 type: string

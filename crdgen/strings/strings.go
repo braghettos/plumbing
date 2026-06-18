@@ -45,7 +45,7 @@ func StrSlice(v any) []string {
 func StrVal(v any) string {
 	switch v := v.(type) {
 	case string:
-		return v
+		return fmt.Sprintf("%q", v)
 	case []byte:
 		return string(v)
 	case error:

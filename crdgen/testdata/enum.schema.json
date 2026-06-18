@@ -9,7 +9,14 @@
     "display": {
       "type": "integer",
       "default": 1,
-      "description": "Numero di volte da mostrare il messaggio"
+      "description": "Numero di volte da mostrare il messaggio",
+      "enum": [1, 2, 3]
+    },
+    "stringStartingWithNumber": {
+      "type": "string",
+      "enum": ["1 - Bassa", "2", "3", "4 - Alta"],
+      "default": "1 - Bassa",
+      "description": "Stringa che inizia con un numero"
     },
     "verbose": {
       "type": "boolean",
@@ -35,6 +42,92 @@
         "type": "string",
         "enum": ["en", "it", "es", "fr"]
       }
+    },
+    "version": {
+      "default": "123abc",
+      "description": "version of the WordPress application",
+      "enum": [
+        "123abc",
+        "250021213",
+        "581ads",
+        "59321312",
+        "60221312"
+      ],
+      "title": "version",
+      "type": "string",
+      "x-crdgen-identifier-name": "Version1"
+    },
+    "version2": {
+      "default": "123",
+      "description": "version of the WordPress application",
+      "enum": [
+        "123",
+        "214",
+        "12312",
+        "1231223",
+        "12312112"
+      ],
+      "title": "version",
+      "type": "string"
+    },
+    "version3": {
+      "default": "v123",
+      "description": "version of the WordPress application",
+      "enum": [
+        "v123",
+        "v250021213",
+        "v585",
+        "v59321312",
+        "v60221312"
+      ],
+      "title": "version",
+      "type": "string",
+      "x-crdgen-identifier-name": "Version3"
+    },
+    "version4": {
+      "default": "1.2.3",
+      "description": "version of the WordPress application",
+      "enum": [
+        "1.2.3",
+        "2.5.0.21213",
+        "5.8.5",
+        "5.9.321312",
+        "1.2.65",
+        "6.0.3"
+      ],
+      "title": "version",
+      "type": "string",
+      "x-crdgen-identifier-name": "Version4"
+    },
+    "version5": {
+      "default": "v1.2.3",
+      "description": "version of the WordPress application",
+      "enum": [
+        "v1.2.3",
+        "v2.5.0.21213",
+        "v5.8.5",
+        "v5.9.321312",
+        "v1.2.65",
+        "v6.0.3"
+      ],
+      "title": "version",
+      "type": "string",
+      "x-crdgen-identifier-name": "Version5"
+    },
+    "version6": {
+      "default": "1-2-3",
+      "description": "version of the WordPress application",
+      "enum": [
+        "1-2-3",
+        "2-5-0-21213",
+        "5-8-5",
+        "5-9-321312",
+        "1-2-65",
+        "6-0-3"
+      ],
+      "title": "version",
+      "type": "string",
+      "x-crdgen-identifier-name": "Version6"
     }
   },
   "required": ["greeting"]

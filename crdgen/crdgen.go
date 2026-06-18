@@ -22,7 +22,15 @@ type Options struct {
 func Generate(opts Options) (dat []byte, err error) {
 	os.Setenv(coders.EnvFormatCode, "1")
 
-	rootdir := os.TempDir()
+	// Use MkdirTemp instead of TempDir to create a unique temporary directory
+	// for each generation. This prevents race conditions when multiple
+	// generations run concurrently.
+	rootdir, err := os.MkdirTemp("", "crdgen-*")
+	if err != nil {
+		return
+	}
+	// Clean up the entire temporary directory after generation
+	defer os.RemoveAll(rootdir)
 
 	err = coders.GenAll(rootdir, &coders.Options{
 		Group:        opts.Group,
@@ -38,9 +46,7 @@ func Generate(opts Options) (dat []byte, err error) {
 	}
 
 	srcdir := coders.SourceDir(rootdir, opts.Kind)
-	if !env.True(coders.EnvKeepCode) {
-		defer os.RemoveAll(srcdir)
-	} else {
+	if env.True(coders.EnvKeepCode) {
 		fmt.Fprintf(os.Stderr, "generated code dir: %s\n", srcdir)
 	}
 

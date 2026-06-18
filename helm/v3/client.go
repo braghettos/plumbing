@@ -1,0 +1,373 @@
+package helm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"time"
+
+	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	"github.com/krateoplatformops/plumbing/helm/getter/cache"
+	"github.com/krateoplatformops/plumbing/helm/v3/tracer"
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/cli"
+	"helm.sh/helm/v3/pkg/storage/driver"
+	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	"k8s.io/client-go/rest"
+)
+
+var _ helmconfig.Client = (*client)(nil)
+
+type client struct {
+	settings          *cli.EnvSettings
+	namespace         string
+	restConfig        *rest.Config
+	cache             *cache.DiskCache
+	debugLog          action.DebugLog
+	cachedClients     *CachedClients
+	crdInformerCancel context.CancelFunc
+}
+
+type ClientOption func(*client) error
+
+func NewClient(cfg *rest.Config, opts ...ClientOption) (*client, error) {
+	settings := cli.New()
+
+	// Default configuration
+	c := &client{
+		settings:   settings,
+		namespace:  settings.Namespace(),
+		restConfig: rest.CopyConfig(cfg),
+		debugLog: func(format string, v ...interface{}) {
+			// Default to discard if no logger is provided
+		},
+	}
+
+	// Apply functional options
+	for _, opt := range opts {
+		if err := opt(c); err != nil {
+			return nil, err
+		}
+	}
+
+	// Sanity check: fail fast at construction if the storage driver / discovery
+	// can't be initialized. The actionConfig itself is discarded; every operation
+	// builds its own via newActionConfig to keep the client safe under concurrency.
+	probe := new(action.Configuration)
+	driver := os.Getenv("HELM_DRIVER")
+	probeLog := func(format string, v ...interface{}) {
+		slog.Debug(fmt.Sprintf(format, v...))
+	}
+	var probeGetter *RESTClientGetter
+	if c.cachedClients != nil {
+		probeGetter = NewRESTClientGetterWithCachedClients(c.namespace, nil, c.restConfig, c.cachedClients)
+	} else {
+		probeGetter = NewRESTClientGetter(c.namespace, nil, c.restConfig)
+	}
+	if err := probe.Init(probeGetter, c.namespace, driver, probeLog); err != nil {
+		return nil, fmt.Errorf("failed to init action config: %w", err)
+	}
+
+	return c, nil
+}
+
+// WithNamespace sets a custom namespace for the client.
+func WithNamespace(ns string) ClientOption {
+	return func(c *client) error {
+		c.namespace = ns
+		c.settings.SetNamespace(ns)
+		return nil
+	}
+}
+
+// WithCache initializes a disk cache with the provided options.
+func WithCache(opts ...cache.Option) ClientOption {
+	return func(c *client) error {
+		dCache, err := cache.NewDiskCache(opts...)
+		if err != nil {
+			return fmt.Errorf("failed to create cache: %w", err)
+		}
+		c.cache = dCache
+		return nil
+	}
+}
+
+// WithLogger configures a custom slog handler for the client.
+func WithLogger(logger action.DebugLog) ClientOption {
+	return func(c *client) error {
+		if logger == nil {
+			// Fallback to discard if nil is passed
+			logger = func(format string, v ...interface{}) {}
+		}
+
+		c.debugLog = logger
+
+		return nil
+	}
+}
+
+// WithCRDInformer enables automatic discovery cache invalidation when CustomResourceDefinitions change.
+// This is useful for applications that need to handle dynamic CRD registration.
+// The informer will start watching CRDs and reset the discovery cache on Add, Update, or Delete events.
+func WithCRDInformer(cfg *rest.Config, resyncTime time.Duration) ClientOption {
+	return func(c *client) error {
+		// Create cached clients if not already created
+		if c.cachedClients == nil {
+			cachedClients, err := NewCachedClients(cfg)
+			if err != nil {
+				return fmt.Errorf("failed to create cached clients: %w", err)
+			}
+			c.cachedClients = &cachedClients
+		}
+
+		// Create a new context for the informer
+		ctx, cancel := context.WithCancel(context.Background())
+		c.crdInformerCancel = cancel
+
+		// Initialize the API extensions client
+		apiExtCli, err := apiextclient.NewForConfig(cfg)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("failed to create API extensions client: %w", err)
+		}
+
+		crdInformer := NewCRDInformer(resyncTime, apiExtCli, c.cachedClients.mapper, c.debugLog)
+		if err := crdInformer.Start(ctx); err != nil {
+			cancel()
+			return fmt.Errorf("failed to start CRD informer: %w", err)
+		}
+
+		return nil
+	}
+}
+
+func (c *client) Close() error {
+	// Stop the CRD informer if it was started
+	if c.crdInformerCancel != nil {
+		c.crdInformerCancel()
+	}
+
+	if c.cache != nil {
+		c.cache.Stop()
+	}
+	return nil
+}
+
+func (c *client) Install(ctx context.Context, releaseName string, chartRef string, cfg *helmconfig.InstallConfig) (*helmconfig.Release, error) {
+	if cfg == nil {
+		cfg = &helmconfig.InstallConfig{}
+	}
+	if cfg.ActionConfig == nil {
+		cfg.ActionConfig = &helmconfig.ActionConfig{}
+	}
+
+	namespace := c.namespace
+	if cfg.Namespace != "" {
+		namespace = cfg.Namespace
+	}
+
+	restCfg := c.restConfig
+	if cfg.RestConfig != nil {
+		restCfg = cfg.RestConfig
+	}
+
+	actionConfig, err := c.newActionConfig(ctx, namespace, restCfg, cfg.ActionConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.install(ctx, namespace, releaseName, chartRef, cfg, actionConfig)
+}
+
+func (c *client) Upgrade(ctx context.Context, releaseName, chartRef string, cfg *helmconfig.UpgradeConfig) (*helmconfig.Release, error) {
+	if cfg == nil {
+		cfg = &helmconfig.UpgradeConfig{}
+	}
+	if cfg.ActionConfig == nil {
+		cfg.ActionConfig = &helmconfig.ActionConfig{}
+	}
+
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, cfg.ActionConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	upgradeClient := action.NewUpgrade(actionConfig)
+	applyUpgradeConfig(upgradeClient, c.namespace, cfg)
+	upgradeClient.PostRenderer = withDuplicateResourceValidation(cfg.PostRenderer, actionConfig.KubeClient)
+
+	chart, err := c.loadChart(ctx, chartRef, c.buildGetterOpts(cfg.ActionConfig))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load chart: %w", err)
+	}
+
+	if err := checkChartType(chart); err != nil {
+		return nil, fmt.Errorf("chart type check failed: %w", err)
+	}
+
+	chart, err = c.checkDependencies(ctx, chart, chartRef, cfg.ActionConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check dependencies: %w", err)
+	}
+
+	rel, err := upgradeClient.RunWithContext(ctx, releaseName, chart, cfg.Values)
+	if err != nil {
+		return nil, fmt.Errorf("upgrade failed: %w", err)
+	}
+	return toWrapperRelease(rel), nil
+}
+
+func (c *client) Uninstall(ctx context.Context, releaseName string, cfg *helmconfig.UninstallConfig) error {
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return err
+	}
+
+	cmd := action.NewUninstall(actionConfig)
+	applyUninstallConfig(cmd, cfg)
+
+	_, err = cmd.Run(releaseName)
+	if err != nil {
+		return fmt.Errorf("uninstall failed: %w", err)
+	}
+
+	return nil
+}
+
+func (c *client) Rollback(ctx context.Context, releaseName string, cfg *helmconfig.RollbackConfig) (*helmconfig.Release, error) {
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rollbackClient := action.NewRollback(actionConfig)
+	applyRollbackConfig(rollbackClient, cfg)
+
+	err = rollbackClient.Run(releaseName)
+	if err != nil {
+		return nil, fmt.Errorf("rollback failed: %w", err)
+	}
+
+	rel, err := c.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get release after rollback: %w", err)
+	}
+
+	return rel, nil
+}
+
+func (c *client) install(ctx context.Context, namespace, releaseName, chartRef string, cfg *helmconfig.InstallConfig, actionConfig *action.Configuration) (*helmconfig.Release, error) {
+	if actionConfig == nil {
+		return nil, errors.New("action config is required")
+	}
+
+	installClient := action.NewInstall(actionConfig)
+	applyInstallConfig(installClient, releaseName, namespace, cfg)
+	installClient.PostRenderer = withDuplicateResourceValidation(cfg.PostRenderer, actionConfig.KubeClient)
+
+	chart, err := c.loadChart(ctx, chartRef, c.buildGetterOpts(cfg.ActionConfig))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load chart: %w", err)
+	}
+
+	if err := checkChartType(chart); err != nil {
+		return nil, fmt.Errorf("chart type check failed: %w", err)
+	}
+
+	chart, err = c.checkDependencies(ctx, chart, chartRef, cfg.ActionConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check dependencies: %w", err)
+	}
+
+	rel, err := installClient.RunWithContext(ctx, chart, cfg.Values)
+	if err != nil {
+		return nil, fmt.Errorf("install failed: %w", err)
+	}
+
+	return toWrapperRelease(rel), nil
+}
+
+func (c *client) newActionConfig(ctx context.Context, namespace string, restCfg *rest.Config, actionCfg *helmconfig.ActionConfig) (*action.Configuration, error) {
+	actionConfig := new(action.Configuration)
+	driver := os.Getenv("HELM_DRIVER")
+
+	debugLog := func(format string, v ...interface{}) {
+		slog.Debug(fmt.Sprintf(format, v...))
+	}
+	if c.debugLog != nil {
+		debugLog = c.debugLog
+	}
+
+	cfgToUse := restCfg
+	if cfgToUse == nil {
+		cfgToUse = c.restConfig
+	}
+
+	if actionCfg != nil && actionCfg.Verbose {
+		cfgToUse = rest.CopyConfig(cfgToUse)
+		t := tracer.NewTracer(ctx, true)
+		if actionCfg.LogWriter != nil {
+			t = t.WithWriter(actionCfg.LogWriter)
+		}
+		cfgToUse.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+			return t.WithRoundTripper(rt)
+		})
+	}
+
+	var clientGetter *RESTClientGetter
+	if c.cachedClients != nil {
+		clientGetter = NewRESTClientGetterWithCachedClients(namespace, nil, cfgToUse, c.cachedClients)
+	} else {
+		clientGetter = NewRESTClientGetter(namespace, nil, cfgToUse)
+	}
+	if err := actionConfig.Init(clientGetter, namespace, driver, debugLog); err != nil {
+		return nil, fmt.Errorf("failed to init action config: %w", err)
+	}
+
+	return actionConfig, nil
+}
+
+func (c *client) GetRelease(ctx context.Context, releaseName string, cfg *helmconfig.GetConfig) (*helmconfig.Release, error) {
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	getClient := action.NewGet(actionConfig)
+	applyGetConfig(getClient, cfg)
+
+	rel, err := getClient.Run(releaseName)
+	if err != nil {
+		if errors.Is(err, driver.ErrReleaseNotFound) {
+			return nil, nil // Not found is not an error for GetRelease
+		}
+		return nil, fmt.Errorf("get release failed: %w", err)
+	}
+
+	return toWrapperRelease(rel), nil
+}
+
+func (c *client) ListReleases(ctx context.Context, cfg *helmconfig.ListConfig) ([]*helmconfig.Release, error) {
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	listClient := action.NewList(actionConfig)
+	applyListConfig(listClient, cfg)
+
+	helmReleases, err := listClient.Run()
+	if err != nil {
+		return nil, fmt.Errorf("list releases failed: %w", err)
+	}
+
+	var releases []*helmconfig.Release
+	for _, rel := range helmReleases {
+		releases = append(releases, toWrapperRelease(rel))
+	}
+
+	return releases, nil
+}
