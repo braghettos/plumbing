@@ -17,6 +17,11 @@ type LabelsPostRender struct {
 	CompositionNamespace string
 	CompositionGVK       schema.GroupVersionKind
 	KrateoNamespace      string
+	// Traceparent/Tracestate, when set, are stamped as krateo.io/traceparent (+ tracestate)
+	// annotations on every rendered child manifest, so the controller that reconciles the
+	// child continues the distributed trace across the compose-of-compositions tree.
+	Traceparent string
+	Tracestate  string
 }
 
 func LabelPostRenderFromSpec(mg *unstructured.Unstructured, pluralizer pluralizer, krateoNamespace string) (*LabelsPostRender, error) {
@@ -34,6 +39,15 @@ func LabelPostRenderFromSpec(mg *unstructured.Unstructured, pluralizer pluralize
 		CompositionGVK:       gvk,
 		KrateoNamespace:      krateoNamespace,
 	}, nil
+}
+
+// WithTraceparent sets the W3C traceparent (+ optional tracestate) to stamp as the
+// krateo.io/traceparent annotation on every rendered child manifest. Returns r for chaining.
+// Additive: callers that don't set it keep the existing label-only behavior.
+func (r *LabelsPostRender) WithTraceparent(traceparent, tracestate string) *LabelsPostRender {
+	r.Traceparent = traceparent
+	r.Tracestate = tracestate
+	return r
 }
 
 func (r *LabelsPostRender) Run(renderedManifests *bytes.Buffer) (modifiedManifests *bytes.Buffer, err error) {
@@ -56,6 +70,18 @@ func (r *LabelsPostRender) Run(renderedManifests *bytes.Buffer) (modifiedManifes
 		labels["krateo.io/composition-kind"] = r.CompositionGVK.Kind
 		labels["krateo.io/krateo-namespace"] = r.KrateoNamespace
 		v.SetLabels(labels)
+
+		if r.Traceparent != "" {
+			annotations := v.GetAnnotations()
+			if annotations == nil {
+				annotations = make(map[string]string)
+			}
+			annotations["krateo.io/traceparent"] = r.Traceparent
+			if r.Tracestate != "" {
+				annotations["krateo.io/tracestate"] = r.Tracestate
+			}
+			v.SetAnnotations(annotations)
+		}
 	}
 
 	str, err := kio.StringAll(nodes)
