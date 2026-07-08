@@ -12,6 +12,12 @@ import (
 	"k8s.io/cli-runtime/pkg/resource"
 )
 
+// traceparentAnnotation is the W3C trace-context annotation the helm post-renderer
+// stamps on every *.krateo.io child resource on each render. It changes every
+// reconcile, so it must be neutralized before the change-detection merge (see step
+// 4.5 in Reconcile) or it would defeat the apply-if-changed no-churn guarantee.
+const traceparentAnnotation = "krateo.io/traceparent"
+
 // Reconcile performs a fork-free, self-healing "apply-if-changed" reconcile of
 // a helm release using ONLY helm's exported Go API.
 //
@@ -99,10 +105,12 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		return nil, fmt.Errorf("reconcile: building target resource list: %w", err)
 	}
 
-	// 4. Snapshot live resourceVersion for each target object BEFORE Update.
+	// 4. Snapshot live resourceVersion for each target object BEFORE Update, and
+	//    capture each live child's current krateo.io/traceparent (see step 4.5).
 	//    Missing (IsNotFound) => absent, will be created by Update.
 	snapshot := make(map[string]string, len(target))
 	absent := make(map[string]bool, len(target))
+	liveTraceparent := make(map[string]string, len(target))
 	for _, info := range target {
 		key := infoKey(info)
 		helper := resource.NewHelper(info.Client, info.Mapping)
@@ -114,6 +122,31 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 			continue
 		}
 		snapshot[key] = resourceVersionOf(live)
+		if tp := annotationOf(live, traceparentAnnotation); tp != "" {
+			liveTraceparent[key] = tp
+		}
+	}
+
+	// 4.5. Neutralize the volatile traceparent stamp. The helm post-renderer stamps a
+	// FRESH krateo.io/traceparent on every *.krateo.io child on each render (trace-context
+	// propagation). That value changes every reconcile, so without this the three-way merge
+	// below would patch it every cycle — an RV bump that reads as a real "change" (step 6),
+	// forcing a helm revision + hooks even though nothing else moved (the exact per-minute
+	// revision churn this reconcile exists to kill; observed on krateo.io-child compositions
+	// like snowplow's authn ServiceAccount and the installer umbrella). We copy the LIVE
+	// child's existing traceparent onto the rendered target so the annotation contributes no
+	// diff: when traceparent is the ONLY difference the merge patch is empty and helm skips the
+	// write entirely (RV stable -> changed=false -> no revision, no hooks). Genuine drift in
+	// every OTHER field still heals. A real change re-stamps a fresh traceparent through the
+	// actual Upgrade in step 7. Freshly-created children (no live value) keep the target stamp.
+	for _, info := range target {
+		key := infoKey(info)
+		if absent[key] {
+			continue
+		}
+		if tp, ok := liveTraceparent[key]; ok {
+			setAnnotation(info.Object, traceparentAnnotation, tp)
+		}
 	}
 
 	// 5. Self-healing merge: creates deleted children, patches drifted ones.
@@ -201,4 +234,35 @@ func resourceVersionOf(obj runtime.Object) string {
 		return ""
 	}
 	return acc.GetResourceVersion()
+}
+
+// annotationOf reads a single metadata annotation from a runtime.Object (typed or
+// unstructured) via apimachinery's meta accessor. Returns "" when absent/unreadable.
+func annotationOf(obj runtime.Object, key string) string {
+	acc, err := apimeta.Accessor(obj)
+	if err != nil {
+		return ""
+	}
+	ann := acc.GetAnnotations()
+	if ann == nil {
+		return ""
+	}
+	return ann[key]
+}
+
+// setAnnotation sets a single metadata annotation on a runtime.Object (typed or
+// unstructured) in place via apimachinery's meta accessor. No-op if the object has
+// no accessible metadata. Mutating the target Info's Object here is reflected in the
+// patch helm computes at merge time (helm re-encodes info.Object to build the diff).
+func setAnnotation(obj runtime.Object, key, val string) {
+	acc, err := apimeta.Accessor(obj)
+	if err != nil {
+		return
+	}
+	ann := acc.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[key] = val
+	acc.SetAnnotations(ann)
 }

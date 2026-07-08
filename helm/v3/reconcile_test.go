@@ -49,6 +49,13 @@ func liveColor(t *testing.T, cs *kubernetes.Clientset, ns, name string) string {
 	return cm.Data["color"]
 }
 
+func liveTraceparent(t *testing.T, cs *kubernetes.Clientset, ns, name string) string {
+	t.Helper()
+	cm, err := cs.CoreV1().ConfigMaps(ns).Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	return cm.Annotations["krateo.io/traceparent"]
+}
+
 // TestControllerReconcile proves the fork-free apply-if-changed Reconcile on a
 // real kind cluster: (c) FIELD DRIFT self-heal and (d) HOOKS ONLY ON CHANGE.
 func TestControllerReconcile(t *testing.T) {
@@ -178,6 +185,58 @@ func TestControllerReconcile(t *testing.T) {
 				liveColor(t, cs, namespace, cmName), hooksPostLoop, hooksPostChange)
 			assert.Equal(t, "green", liveColor(t, cs, namespace, cmName))
 			assert.Equal(t, hooksPostLoop+1, hooksPostChange, "a genuine change must fire the hook exactly once")
+
+			// =========================================================
+			// (e) TRACEPARENT NO-CHURN — a change confined to the volatile
+			// krateo.io/traceparent annotation must be a no-op. This is the exact
+			// interaction that made snowplow + the installer umbrella keep churning:
+			// the post-renderer stamps a fresh traceparent on every *.krateo.io child
+			// each render, and without step 4.5 the three-way merge patches it every
+			// cycle (revision++). The chart's ConfigMap now carries
+			// krateo.io/traceparent={{ .Values.traceparent }} to simulate that stamp.
+			// =========================================================
+			cfgTP := func(color, tp string) *helmconfig.UpgradeConfig {
+				return &helmconfig.UpgradeConfig{
+					ActionConfig: &helmconfig.ActionConfig{
+						TakeOwnership: true,
+						Values:        map[string]interface{}{"color": color, "traceparent": tp},
+					},
+				}
+			}
+
+			// Establish a baseline traceparent (real change: "" -> TP-A).
+			res, err = cli.Reconcile(ctx, releaseName, chartURL, cfgTP("green", "TP-A"))
+			require.NoError(t, err)
+			assert.True(t, res.Changed, "adding the first traceparent value is a real change")
+			assert.Equal(t, "TP-A", liveTraceparent(t, cs, namespace, cmName))
+			revBaseTP := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksBaseTP := hookFireCount(t, cs, namespace)
+
+			// Now render a DIFFERENT traceparent each cycle with NO other change.
+			// Every one must be a no-op: no revision, no hook, and the live value must
+			// stay at the baseline (step 4.5 copies live TP-A onto the target).
+			for i, tp := range []string{"TP-B", "TP-C", "TP-D", "TP-E", "TP-F"} {
+				r, err := cli.Reconcile(ctx, releaseName, chartURL, cfgTP("green", tp))
+				require.NoError(t, err)
+				assert.False(t, r.Changed, "traceparent-only reconcile #%d (render=%s) must be a no-op", i, tp)
+			}
+			revAfterTP := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksAfterTP := hookFireCount(t, cs, namespace)
+			liveTP := liveTraceparent(t, cs, namespace, cmName)
+			t.Logf("[traceparent] after 5 differing-traceparent reconciles: revisions %d->%d hookFires %d->%d liveTraceparent=%q",
+				revBaseTP, revAfterTP, hooksBaseTP, hooksAfterTP, liveTP)
+			assert.Equal(t, revBaseTP, revAfterTP, "traceparent-only churn must NOT add helm revisions")
+			assert.Equal(t, hooksBaseTP, hooksAfterTP, "traceparent-only churn must NOT fire hooks")
+			assert.Equal(t, "TP-A", liveTP, "live traceparent must stay at baseline (never patched by the volatile render)")
+
+			// Contrast: a real change alongside a new traceparent must still go through
+			// (and the actual upgrade re-stamps traceparent to the new value).
+			res, err = cli.Reconcile(ctx, releaseName, chartURL, cfgTP("yellow", "TP-REAL"))
+			require.NoError(t, err)
+			assert.True(t, res.Changed, "a real data change must be detected even amid a traceparent change")
+			assert.Equal(t, "yellow", liveColor(t, cs, namespace, cmName))
+			assert.Equal(t, "TP-REAL", liveTraceparent(t, cs, namespace, cmName), "a real upgrade re-stamps the fresh traceparent")
+			assert.Equal(t, revAfterTP+1, helmRevisionCount(t, cs, namespace, releaseName), "the real change bumps the revision exactly once")
 
 			return ctx
 		}).
