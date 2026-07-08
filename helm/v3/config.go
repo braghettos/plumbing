@@ -55,6 +55,12 @@ func applyUpgradeConfig(client *action.Upgrade, namespace string, cfg *helmconfi
 	client.Wait = cfg.Wait
 	client.Atomic = cfg.Atomic
 	client.Force = cfg.Force
+	// TakeOwnership: adopt an existing resource instead of aborting the upgrade when it carries
+	// non-Helm ownership metadata. action.Upgrade supports this (helm >= 3.x), but the mapping was
+	// missing here (only applyInstallConfig set it), so callers could not opt in on upgrade. This lets
+	// the composition engine take ownership of an out-of-band-created/edited child instead of one
+	// un-adoptable object 500-ing and wedging the whole release (Krateo D1, 2026-07-08).
+	client.TakeOwnership = cfg.TakeOwnership
 	client.Install = cfg.Install
 	client.MaxHistory = cfg.MaxHistory
 	client.Labels = cfg.Labels
