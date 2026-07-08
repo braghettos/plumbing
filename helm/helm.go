@@ -29,11 +29,31 @@ func (r *Release) GetManifest() string {
 	return r.Manifest
 }
 
+// ReconcileResult reports what a Reconcile did to converge the cluster to the
+// rendered chart. Changed is true iff the live cluster was actually mutated
+// (a child was created, deleted, or patched with a non-empty diff). When
+// Changed is false the cluster already matched the desired manifest and NO new
+// helm revision was written and NO hooks ran.
+type ReconcileResult struct {
+	Changed        bool
+	Created        int
+	Deleted        int
+	PatchedUpdated int
+	Release        *Release
+}
+
 // Client is the interface that the rest of your app uses.
 // It returns your custom *Release, not the Helm SDK struct.
 type Client interface {
 	Install(ctx context.Context, releaseName string, chartRef string, config *InstallConfig) (*Release, error)
 	Upgrade(ctx context.Context, releaseName string, chartRef string, config *UpgradeConfig) (*Release, error)
+	// Reconcile performs a fork-free, self-healing "apply-if-changed" reconcile:
+	// it converges the live cluster to the rendered chart (recreating deleted
+	// children and patching drifted fields via helm's 3-way merge) and writes a
+	// new revision + runs hooks ONLY when the cluster was actually mutated. At
+	// steady state it is a no-op (no revision, no hooks). See the v3 impl for the
+	// exact change-detection semantics.
+	Reconcile(ctx context.Context, releaseName string, chartRef string, config *UpgradeConfig) (*ReconcileResult, error)
 	Uninstall(ctx context.Context, releaseName string, config *UninstallConfig) error
 	Rollback(ctx context.Context, releaseName string, config *RollbackConfig) (*Release, error)
 	GetRelease(ctx context.Context, releaseName string, config *GetConfig) (*Release, error)
