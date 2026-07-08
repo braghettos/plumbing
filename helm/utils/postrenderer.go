@@ -3,12 +3,34 @@ package utils
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/kustomize/kyaml/kio"
 )
+
+// isKrateoAPIGroup reports whether an apiVersion belongs to a Krateo API group
+// (krateo.io or any *.krateo.io subgroup, e.g. composition.krateo.io). Only Krateo
+// controllers reconciling nested Krateo CRs read krateo.io/traceparent to continue the
+// distributed trace, so the annotation is meaningful ONLY on Krateo resources.
+//
+// Stamping the per-reconcile traceparent on leaf Kubernetes resources (Service,
+// Deployment, ConfigMap, ...) is not just inert, it is HARMFUL: the cdc re-applies every
+// composition each reconcile, so the changing annotation patches every child object every
+// cycle. For a type=LoadBalancer Service that update makes the cloud service-controller
+// re-run EnsureLoadBalancer every reconcile — observed on GKE as a constant LB IP
+// reserve/release thrash (EnsuringLoadBalancer firing ~1/min for days on every LB Service).
+// Restricting the stamp to Krateo groups preserves cross-composition trace propagation while
+// stopping the leaf-resource churn.
+func isKrateoAPIGroup(apiVersion string) bool {
+	group := apiVersion
+	if i := strings.IndexByte(apiVersion, '/'); i >= 0 {
+		group = apiVersion[:i]
+	}
+	return group == "krateo.io" || strings.HasSuffix(group, ".krateo.io")
+}
 
 type LabelsPostRender struct {
 	UID                  types.UID
@@ -71,7 +93,11 @@ func (r *LabelsPostRender) Run(renderedManifests *bytes.Buffer) (modifiedManifes
 		labels["krateo.io/krateo-namespace"] = r.KrateoNamespace
 		v.SetLabels(labels)
 
-		if r.Traceparent != "" {
+		// Only stamp the trace context on Krateo resources (nested Composition CRs) whose
+		// controllers actually continue the trace; never on leaf k8s resources, where a
+		// per-reconcile annotation change churns the object (and re-ensures LoadBalancer
+		// Services on every reconcile). See isKrateoAPIGroup.
+		if r.Traceparent != "" && isKrateoAPIGroup(v.GetApiVersion()) {
 			annotations := v.GetAnnotations()
 			if annotations == nil {
 				annotations = make(map[string]string)
