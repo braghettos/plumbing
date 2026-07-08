@@ -56,6 +56,13 @@ func liveTraceparent(t *testing.T, cs *kubernetes.Clientset, ns, name string) st
 	return cm.Annotations["krateo.io/traceparent"]
 }
 
+func liveSecretVal(t *testing.T, cs *kubernetes.Clientset, ns, name, key string) string {
+	t.Helper()
+	s, err := cs.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	return string(s.Data[key]) // clientset decodes data (base64) into raw bytes
+}
+
 // TestControllerReconcile proves the fork-free apply-if-changed Reconcile on a
 // real kind cluster: (c) FIELD DRIFT self-heal and (d) HOOKS ONLY ON CHANGE.
 func TestControllerReconcile(t *testing.T) {
@@ -237,6 +244,54 @@ func TestControllerReconcile(t *testing.T) {
 			assert.Equal(t, "yellow", liveColor(t, cs, namespace, cmName))
 			assert.Equal(t, "TP-REAL", liveTraceparent(t, cs, namespace, cmName), "a real upgrade re-stamps the fresh traceparent")
 			assert.Equal(t, revAfterTP+1, helmRevisionCount(t, cs, namespace, releaseName), "the real change bumps the revision exactly once")
+
+			// =========================================================
+			// (f) STRINGDATA NO-CHURN — a Secret authored via stringData must not
+			// churn once its value is stable. The apiserver folds stringData into data
+			// and drops stringData; without Reconcile step 4.6 the render re-adds
+			// stringData every cycle and the merge patches it forever (the installer
+			// umbrella's jwt-sign-key). The drift-hooks chart's Secret uses
+			// stringData.token={{ .Values.token }}.
+			// =========================================================
+			secretName := releaseName + "-secret"
+			cfgTok := func(color, tok string) *helmconfig.UpgradeConfig {
+				return &helmconfig.UpgradeConfig{
+					ActionConfig: &helmconfig.ActionConfig{
+						TakeOwnership: true,
+						Values:        map[string]interface{}{"color": color, "token": tok},
+					},
+				}
+			}
+
+			// One reconcile to settle the secret at a known token (may be a real change
+			// since earlier configs didn't set token -> default "seed-token").
+			_, err = cli.Reconcile(ctx, releaseName, chartURL, cfgTok("yellow", "tok-STABLE"))
+			require.NoError(t, err)
+			require.Equal(t, "tok-STABLE", liveSecretVal(t, cs, namespace, secretName, "token"))
+			revBaseSD := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksBaseSD := hookFireCount(t, cs, namespace)
+
+			// Same stringData value, repeated: every reconcile must be a no-op despite the
+			// render carrying stringData while live carries only data.
+			for i := 0; i < 5; i++ {
+				r, err := cli.Reconcile(ctx, releaseName, chartURL, cfgTok("yellow", "tok-STABLE"))
+				require.NoError(t, err)
+				assert.False(t, r.Changed, "stable-stringData reconcile #%d must be a no-op", i)
+			}
+			revAfterSD := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksAfterSD := hookFireCount(t, cs, namespace)
+			t.Logf("[stringData] after 5 stable-stringData reconciles: revisions %d->%d hookFires %d->%d secretToken=%q",
+				revBaseSD, revAfterSD, hooksBaseSD, hooksAfterSD, liveSecretVal(t, cs, namespace, secretName, "token"))
+			assert.Equal(t, revBaseSD, revAfterSD, "stable stringData must NOT add helm revisions")
+			assert.Equal(t, hooksBaseSD, hooksAfterSD, "stable stringData must NOT fire hooks")
+			assert.Equal(t, "tok-STABLE", liveSecretVal(t, cs, namespace, secretName, "token"))
+
+			// A genuine secret value change must still be detected and applied.
+			res, err = cli.Reconcile(ctx, releaseName, chartURL, cfgTok("yellow", "tok-CHANGED"))
+			require.NoError(t, err)
+			assert.True(t, res.Changed, "a real stringData value change must be detected")
+			assert.Equal(t, "tok-CHANGED", liveSecretVal(t, cs, namespace, secretName, "token"), "the new secret value must be applied")
+			assert.Equal(t, revAfterSD+1, helmRevisionCount(t, cs, namespace, releaseName), "the real secret change bumps the revision exactly once")
 
 			return ctx
 		}).

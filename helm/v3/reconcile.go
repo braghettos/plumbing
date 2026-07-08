@@ -2,12 +2,14 @@ package helm
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/resource"
 )
@@ -149,6 +151,20 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		}
 	}
 
+	// 4.6. Normalize Secret stringData -> data. A chart that writes a Secret via
+	// stringData never converges under an apply loop: the apiserver base64-encodes
+	// stringData into data and DROPS stringData, so the next render re-adds stringData
+	// while live only has data — an eternal diff the three-way merge patches every cycle
+	// (revision churn even when the secret VALUE is unchanged; observed on the installer
+	// umbrella's jwt-sign-key). We fold stringData into data (exactly as the apiserver
+	// does: data[k] = base64(stringData[k]), stringData wins on key collisions) on the
+	// rendered target so it matches the stored representation and contributes no diff when
+	// the value is stable. A real value change still differs in data -> changed=true. This
+	// runs on every target (a create-time secret is equally valid expressed as data).
+	for _, info := range target {
+		normalizeSecretStringData(info.Object)
+	}
+
 	// 5. Self-healing merge: creates deleted children, patches drifted ones.
 	// UpdateThreeWayMerge (NOT Update) so UNSTRUCTURED/CR children get helm's
 	// three-way-with-live merge (createPatch -> CreateThreeWayJSONMergePatch(lastApplied,
@@ -265,4 +281,37 @@ func setAnnotation(obj runtime.Object, key, val string) {
 	}
 	ann[key] = val
 	acc.SetAnnotations(ann)
+}
+
+// normalizeSecretStringData folds a core/v1 Secret's stringData into data in place,
+// mirroring the apiserver's write-time behavior: each stringData[k] is base64-encoded
+// into data[k] (stringData wins on collision) and stringData is removed. This keeps a
+// stringData-authored Secret from reading as perpetual drift against its stored (data)
+// representation. helm's kube Build yields *unstructured.Unstructured for every object,
+// so a non-Secret / non-unstructured object is a no-op.
+func normalizeSecretStringData(obj runtime.Object) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	if u.GetKind() != "Secret" || u.GetAPIVersion() != "v1" {
+		return
+	}
+	stringData, found, err := unstructured.NestedStringMap(u.Object, "stringData")
+	if err != nil || !found || len(stringData) == 0 {
+		return
+	}
+	data, _, _ := unstructured.NestedStringMap(u.Object, "data")
+	if data == nil {
+		data = map[string]string{}
+	}
+	for k, v := range stringData {
+		data[k] = base64.StdEncoding.EncodeToString([]byte(v))
+	}
+	di := make(map[string]interface{}, len(data))
+	for k, v := range data {
+		di[k] = v
+	}
+	_ = unstructured.SetNestedMap(u.Object, di, "data")
+	unstructured.RemoveNestedField(u.Object, "stringData")
 }
