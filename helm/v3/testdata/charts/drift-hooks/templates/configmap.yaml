@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # Simulates the helm post-renderer's per-render krateo.io/traceparent stamp: a
+    # value that changes every reconcile. The traceparent-no-churn test renders it with
+    # a DIFFERENT value each cycle and asserts the reconcile treats a traceparent-only
+    # difference as a no-op (Reconcile step 4.5 copies the live value onto the target).
+    krateo.io/traceparent: {{ .Values.traceparent | default "" | quote }}
+data:
+  # Declared, mutable field. The field-drift test mutates this out-of-band and
+  # asserts the reconcile patches it back to {{ .Values.color }}.
+  color: {{ .Values.color | quote }}

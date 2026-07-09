@@ -1,0 +1,6 @@
+apiVersion: v2
+name: drift-hooks
+description: A minimal chart for exercising field-drift self-heal and hooks-only-on-change reconcile.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

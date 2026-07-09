@@ -1,0 +1,4 @@
+# color is the declared value of the mutable ConfigMap field used for the
+# field-drift self-heal test. When drift mutates data.color out-of-band, the
+# reconcile must patch it back to this value.
+color: blue
