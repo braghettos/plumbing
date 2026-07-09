@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Name }}-demo
+  # NB: intentionally NO kubernetes.io/metadata.name label — the apiserver auto-stamps it on
+  # every Namespace. Under the old RV-delta change-detection the three-way merge fought that
+  # server-managed label every cycle (the render lacks it, live has it), bumping the object's
+  # resourceVersion and churning a helm revision at steady state (portal's demo-system Namespace).
+  # The server-side-diff change-detection must recognize the apiserver re-adding it as a no-op.
+  labels:
+    drift-hooks/purpose: server-managed-field-test

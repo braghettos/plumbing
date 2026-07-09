@@ -63,6 +63,13 @@ func liveSecretVal(t *testing.T, cs *kubernetes.Clientset, ns, name, key string)
 	return string(s.Data[key]) // clientset decodes data (base64) into raw bytes
 }
 
+func liveNamespaceLabel(t *testing.T, cs *kubernetes.Clientset, name, key string) string {
+	t.Helper()
+	n, err := cs.CoreV1().Namespaces().Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	return n.Labels[key]
+}
+
 // TestControllerReconcile proves the fork-free apply-if-changed Reconcile on a
 // real kind cluster: (c) FIELD DRIFT self-heal and (d) HOOKS ONLY ON CHANGE.
 func TestControllerReconcile(t *testing.T) {
@@ -292,6 +299,30 @@ func TestControllerReconcile(t *testing.T) {
 			assert.True(t, res.Changed, "a real stringData value change must be detected")
 			assert.Equal(t, "tok-CHANGED", liveSecretVal(t, cs, namespace, secretName, "token"), "the new secret value must be applied")
 			assert.Equal(t, revAfterSD+1, helmRevisionCount(t, cs, namespace, releaseName), "the real secret change bumps the revision exactly once")
+
+			// =========================================================
+			// (g) SERVER-MANAGED FIELD NO-CHURN — the chart renders a Namespace WITHOUT the
+			// kubernetes.io/metadata.name label; the apiserver auto-stamps it. The old RV-delta
+			// change-detection fought that server-managed label every cycle (portal's demo-system
+			// Namespace); the server-side-diff must treat the apiserver re-adding it as no-change.
+			nsName := releaseName + "-demo"
+			// The apiserver has stamped kubernetes.io/metadata.name by now; confirm it's there and
+			// NOT in the render.
+			require.Equal(t, nsName, liveNamespaceLabel(t, cs, nsName, "kubernetes.io/metadata.name"),
+				"apiserver should auto-stamp kubernetes.io/metadata.name")
+			revBaseNS := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksBaseNS := hookFireCount(t, cs, namespace)
+			for i := 0; i < 5; i++ {
+				r, err := cli.Reconcile(ctx, releaseName, chartURL, cfgTok("yellow", "tok-CHANGED"))
+				require.NoError(t, err)
+				assert.False(t, r.Changed, "server-managed-field reconcile #%d must be a no-op (apiserver auto-label is not real drift)", i)
+			}
+			revAfterNS := helmRevisionCount(t, cs, namespace, releaseName)
+			hooksAfterNS := hookFireCount(t, cs, namespace)
+			t.Logf("[server-managed] after 5 reconciles with a Namespace carrying an apiserver auto-label: revisions %d->%d hookFires %d->%d",
+				revBaseNS, revAfterNS, hooksBaseNS, hooksAfterNS)
+			assert.Equal(t, revBaseNS, revAfterNS, "an apiserver-managed field must NOT add helm revisions")
+			assert.Equal(t, hooksBaseNS, hooksAfterNS, "an apiserver-managed field must NOT fire hooks")
 
 			return ctx
 		}).
