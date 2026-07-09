@@ -296,10 +296,18 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 
 // childWouldChange reports whether applying the rendered target to this live child would actually
 // change the SERVER-PERSISTED state (a real change), as opposed to a server-normalized no-op that
-// merely bumps resourceVersion. It first computes the three-way JSON merge patch (stored-original,
-// target, live): an empty patch => no diff (live-only defaults preserved). A non-empty patch is
-// then dry-run applied and the server's would-be result compared to live, ignoring purely volatile
-// metadata: equal => the apiserver normalizes the patch away (not a real change), differ => real.
+// merely bumps resourceVersion.
+//
+// Cheap pre-filter: the three-way JSON merge patch (stored-original, target, live). An empty patch
+// means the declared state already matches and live-only fields are preserved -> no change, skip
+// the API round-trip. A NON-empty patch might still be a server no-op (e.g. it removes the
+// apiserver-owned kubernetes.io/metadata.name label, or a Namespace's spec.finalizers, which the
+// server re-adds/preserves), so we confirm the way `kubectl diff` does: a SERVER-SIDE APPLY dry-run
+// of the target (not the raw merge patch — that would delete live-only fields the server keeps).
+// SSA runs the apiserver's defaulting/admission/field-ownership merge, so the returned object is
+// exactly what WOULD be stored; comparing it to live (ignoring purely volatile metadata) tells us
+// if anything real would change. This is why the raw-merge-patch dry-run gave false positives on a
+// Namespace: it applied "remove metadata.name/spec", which the server honored in the dry-run.
 func (c *client) childWouldChange(ctx context.Context, original runtime.Object, info *resource.Info, live runtime.Object) (bool, error) {
 	originalJSON := []byte("{}")
 	if original != nil {
@@ -326,14 +334,16 @@ func (c *client) childWouldChange(ctx context.Context, original runtime.Object, 
 		return false, nil
 	}
 
-	// Non-empty patch: confirm it is not a server no-op by dry-run applying it and comparing the
-	// server's would-be result to live (ignoring volatile metadata).
+	// Non-empty patch: confirm via a server-side apply dry-run of the target (kubectl-diff style).
+	force := true
 	helper := resource.NewHelper(info.Client, info.Mapping)
-	result, err := helper.Patch(info.Namespace, info.Name, types.MergePatchType, patch, &metav1.PatchOptions{
-		DryRun: []string{metav1.DryRunAll},
+	result, err := helper.Patch(info.Namespace, info.Name, types.ApplyPatchType, targetJSON, &metav1.PatchOptions{
+		DryRun:       []string{metav1.DryRunAll},
+		FieldManager: reconcileFieldManager,
+		Force:        &force,
 	})
 	if err != nil {
-		return false, fmt.Errorf("dry-run patch: %w", err)
+		return false, fmt.Errorf("server-side apply dry-run: %w", err)
 	}
 	resStripped, err := strippedJSON(result)
 	if err != nil {
@@ -349,6 +359,10 @@ func (c *client) childWouldChange(ctx context.Context, original runtime.Object, 
 	}
 	return !isEmptyPatch(rp), nil
 }
+
+// reconcileFieldManager is the field-manager used for the change-detection server-side-apply
+// dry-run. It never persists (dry-run only), so it does not take real field ownership.
+const reconcileFieldManager = "krateo-cdc-reconcile-diff"
 
 // isEmptyPatch reports whether a JSON merge patch is a no-op ("" or "{}").
 func isEmptyPatch(patch []byte) bool {
