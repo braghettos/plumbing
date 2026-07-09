@@ -3,9 +3,12 @@ package helm
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -113,6 +116,7 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 	snapshot := make(map[string]string, len(target))
 	absent := make(map[string]bool, len(target))
 	liveTraceparent := make(map[string]string, len(target))
+	liveObj := make(map[string]runtime.Object, len(target))
 	for _, info := range target {
 		key := infoKey(info)
 		helper := resource.NewHelper(info.Client, info.Mapping)
@@ -124,6 +128,7 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 			continue
 		}
 		snapshot[key] = resourceVersionOf(live)
+		liveObj[key] = live
 		if tp := annotationOf(live, traceparentAnnotation); tp != "" {
 			liveTraceparent[key] = tp
 		}
@@ -163,6 +168,32 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 	// runs on every target (a create-time secret is equally valid expressed as data).
 	for _, info := range target {
 		normalizeSecretStringData(info.Object)
+	}
+
+	// 4.7. DEBUG diagnostic (RECONCILE_DEBUG_DIFF env). For each target that already exists,
+	// emit the live->target JSON merge patch AFTER the traceparent copy (4.5) + stringData fold
+	// (4.6), with volatile server fields and helm-owned metadata stripped. This shows EXACTLY
+	// what the change-detection merge will act on per child: an empty patch means the RV-delta
+	// (step 6) over-counts a no-op apply; a `krateo.io/traceparent` patch means the 4.5 copy did
+	// not neutralize it; any spec/other field is a genuine hidden driver. Off unless the env is set.
+	if debugDiffEnabled() {
+		for _, info := range target {
+			key := infoKey(info)
+			if absent[key] {
+				c.debugLog("reconcile-diff: %s ABSENT (will create)", key)
+				continue
+			}
+			patch, derr := liveToTargetMergePatch(liveObj[key], info.Object)
+			if derr != nil {
+				c.debugLog("reconcile-diff: %s diff-error: %v", key, derr)
+				continue
+			}
+			if len(patch) > 0 && string(patch) != "{}" {
+				c.debugLog("reconcile-diff: %s would-patch %s", key, string(patch))
+			} else {
+				c.debugLog("reconcile-diff: %s clean (no field diff; any RV bump is a no-op apply artifact)", key)
+			}
+		}
 	}
 
 	// 5. Self-healing merge: creates deleted children, patches drifted ones.
@@ -206,10 +237,18 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		}
 		if newRV != snapshot[key] {
 			patched++
+			if debugDiffEnabled() {
+				// Correlate with the 4.7 diff: a child that logged "clean" there but bumped
+				// RV here proves the merge/apply over-counts (RV moved with no real field diff).
+				c.debugLog("reconcile-diff: %s RV-BUMPED %s -> %s (counted as changed)", key, snapshot[key], newRV)
+			}
 		}
 	}
 
 	changed := created > 0 || deleted > 0 || patched > 0
+	if debugDiffEnabled() {
+		c.debugLog("reconcile-diff: SUMMARY created=%d deleted=%d patched=%d changed=%v", created, deleted, patched, changed)
+	}
 
 	result := &helmconfig.ReconcileResult{
 		Changed:        changed,
@@ -233,6 +272,56 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 	}
 	result.Release = rel
 	return result, nil
+}
+
+// debugDiffEnabled reports whether the 4.7 per-child diff diagnostic is on.
+func debugDiffEnabled() bool {
+	v := os.Getenv("RECONCILE_DEBUG_DIFF")
+	return v == "1" || v == "true" || v == "TRUE"
+}
+
+// liveToTargetMergePatch computes the JSON merge patch that would take live -> target after
+// stripping fields that are never "real drift": volatile server metadata (resourceVersion,
+// generation, uid, creationTimestamp, managedFields), helm-owned ownership metadata (the
+// three-way merge preserves these regardless), and status. traceparent is deliberately KEPT so
+// the diagnostic reveals whether the 4.5 copy neutralized it.
+func liveToTargetMergePatch(live, target runtime.Object) ([]byte, error) {
+	liveJSON, err := strippedJSON(live)
+	if err != nil {
+		return nil, fmt.Errorf("marshal live: %w", err)
+	}
+	targetJSON, err := strippedJSON(target)
+	if err != nil {
+		return nil, fmt.Errorf("marshal target: %w", err)
+	}
+	return jsonpatch.CreateMergePatch(liveJSON, targetJSON)
+}
+
+// strippedJSON marshals obj to JSON with never-drift fields removed (see liveToTargetMergePatch).
+func strippedJSON(obj runtime.Object) ([]byte, error) {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	delete(m, "status")
+	if md, ok := m["metadata"].(map[string]interface{}); ok {
+		for _, k := range []string{"resourceVersion", "generation", "uid", "creationTimestamp", "managedFields", "selfLink"} {
+			delete(md, k)
+		}
+		if ann, ok := md["annotations"].(map[string]interface{}); ok {
+			delete(ann, "meta.helm.sh/release-name")
+			delete(ann, "meta.helm.sh/release-namespace")
+			delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
+		}
+		if lbl, ok := md["labels"].(map[string]interface{}); ok {
+			delete(lbl, "app.kubernetes.io/managed-by")
+		}
+	}
+	return json.Marshal(m)
 }
 
 // infoKey uniquely identifies a resource.Info across the current/target lists.
