@@ -57,7 +57,7 @@ func checkChartType(ch *chart.Chart) error {
 }
 
 func toWrapperRelease(rel *release.Release) *helmconfig.Release {
-	return &helmconfig.Release{
+	r := &helmconfig.Release{
 		Name:         rel.Name,
 		Namespace:    rel.Namespace,
 		Revision:     rel.Version,
@@ -65,4 +65,8 @@ func toWrapperRelease(rel *release.Release) *helmconfig.Release {
 		Status:       helmconfig.Status(rel.Info.Status),
 		Manifest:     rel.Manifest,
 	}
+	if rel.Info != nil {
+		r.Updated = rel.Info.LastDeployed.Time // helm's pkg/time.Time -> stdlib time.Time
+	}
+	return r
 }

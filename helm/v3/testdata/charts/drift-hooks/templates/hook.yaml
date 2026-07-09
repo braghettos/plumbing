@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Named per-revision so every hook firing leaves a distinct, countable object.
+  # A pre-upgrade hook only runs when helm actually performs an upgrade (writes a
+  # revision). At steady state the reconcile is a no-op and the hook does NOT fire,
+  # so the count of hook-rev-* ConfigMaps stays flat; a real change bumps the
+  # revision, fires the hook, and adds exactly one new object.
+  name: {{ .Release.Name }}-hook-rev-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    drift-hooks/hook: pre-upgrade
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+data:
+  revision: {{ .Release.Revision | quote }}
