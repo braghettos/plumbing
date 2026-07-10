@@ -1,0 +1,16 @@
+{{- if .Values.adopted }}
+# Gated resource for the ADOPT test (Reconcile step 4.7). Installed ABSENT (adopted unset),
+# so the stored manifest never tracked it; then pre-created LIVE out-of-band and rendered
+# with adopted=true. A reconcile then sees it in `target` and live, but MISSING from
+# `current` — exactly the state a child's CRD-version migration leaves behind (kc.Build
+# drops the pruned old-GVK entry while the CR stays live). Without the fix helm's Update
+# errors "no ConfigMap with the name <release>-adopted found"; with it, the live object is
+# injected into `current` and adopted via three-way merge.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-adopted
+  namespace: {{ .Release.Namespace }}
+data:
+  note: {{ .Values.adoptedNote | default "adopted-render" | quote }}
+{{- end }}
