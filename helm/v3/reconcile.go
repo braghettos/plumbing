@@ -171,32 +171,48 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		normalizeSecretStringData(info.Object)
 	}
 
-	// 4.7. Drop "current" resources superseded by a GVK migration. When a child changes
-	// apiVersion between the stored release and the fresh render — e.g. a CRD version bump
-	// (composition.krateo.io/v1-2-2 -> v1-3-2) after a component version change — the stored
-	// manifest still pins the OLD GVK while the target carries the NEW one. Left in `current`,
-	// helm's three-way merge sees the old-GVK entry as "removed" and tries to DELETE it, but the
-	// old CRD version is no longer served, so the delete fails NotFound and the whole reconcile
-	// errors — wedging this AND every future reconcile, because the stored manifest never
-	// advances past the dead GVK. These are the SAME logical object migrating versions: the
-	// target's new-GVK entry updates the migrated live object (helm GETs each target and patches
-	// when it exists), so the stale old-GVK entry must be skipped, not deleted. Match on
-	// Kind+Namespace+Name (version-independent) with a differing apiVersion.
-	if len(current) > 0 {
-		targetGVK := make(map[string]string, len(target))
-		for _, info := range target {
-			gvk := info.Mapping.GroupVersionKind
-			targetGVK[gvk.Kind+"\x00"+info.Namespace+"\x00"+info.Name] = gvk.GroupVersion().String()
+	// 4.7. Adopt live-existing target resources that are MISSING from `current`. A child's
+	// CRD-version migration (composition.krateo.io/v1-2-2 -> v1-3-2 after a component version
+	// bump) leaves the stored manifest either pinning the OLD version — which kc.Build can no
+	// longer map once that version is pruned from the CRD, so it silently drops the entry
+	// (the builder runs ContinueOnError) — or missing the child outright. Either way `current`
+	// ends up WITHOUT a resource that is (a) rendered in `target` and (b) already live. helm's
+	// Update then reaches `original.Get(info) == nil` for that live object and returns
+	// "no <kind> with the name <name> found" (pkg/kube/client.go), failing the whole reconcile
+	// and wedging it forever — the stored manifest never advances past the migration, so every
+	// future reconcile re-hits the same missing entry. (Observed live: the installer umbrella
+	// lost KrateoFrontend/frontend from its stored manifest across the frontend v1-2-2 -> v1-3-2
+	// bump while the CR stayed live and healthy.)
+	//
+	// NOTE this is the INVERSE of a delete problem: helm matches original<->target on
+	// group+kind+name+namespace, VERSION-INDEPENDENT (isMatchingInfo), so an old-GVK entry that
+	// DOES survive in `current` still matches its new-GVK target and is patched, never deleted —
+	// dropping such an entry (an earlier approach) would itself CREATE this error. The only
+	// failure mode is a live target with NO original at all, so we ADOPT: inject the live object
+	// as the missing `current` entry, and helm three-way-merges (patches) it instead of erroring.
+	// Guarded on live-present AND genuinely-absent-from-current, so it can only convert an
+	// otherwise-certain "no <kind> found" into a normal patch — never alters a converging case.
+	for _, tinfo := range target {
+		if absent[infoKey(tinfo)] {
+			continue // live absent -> helm's createResource path handles it
 		}
-		kept := make(kube.ResourceList, 0, len(current))
-		for _, info := range current {
-			gvk := info.Mapping.GroupVersionKind
-			if tv, ok := targetGVK[gvk.Kind+"\x00"+info.Namespace+"\x00"+info.Name]; ok && tv != gvk.GroupVersion().String() {
-				continue // superseded by a GVK migration — target updates the migrated live object
-			}
-			kept = append(kept, info)
+		if current.Get(tinfo) != nil {
+			continue // a matching original already exists (any version) -> normal patch/no-op
 		}
-		current = kept
+		// Use the TARGET object (not the live one) as the adopted `original`. helm's
+		// createPatch computes CreateThreeWayJSONMergePatch(original, target, live): a key
+		// present in `original` but absent from `target` is DELETED. The rendered target does
+		// not carry helm's own ownership metadata (app.kubernetes.io/managed-by,
+		// meta.helm.sh/release-*) — the apiserver/helm add it at apply time — so injecting the
+		// LIVE object as `original` would make the merge strip that metadata, and the follow-up
+		// real Upgrade (step 7) would then reject the now-unowned resource ("cannot be imported").
+		// With original == target the merge has zero deletions: it reconciles live to target and
+		// PRESERVES every live-only field (ownership labels, controller-written fields). That is
+		// exactly adopt semantics — "helm last applied this target" — and it heals genuine drift
+		// in target-declared fields all the same.
+		adopted := *tinfo
+		adopted.Object = tinfo.Object.DeepCopyObject()
+		current = append(current, &adopted)
 	}
 
 	// 5. Self-healing merge: creates children deleted out-of-band, reverts field drift. This is the

@@ -11,6 +11,7 @@ import (
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -323,6 +324,78 @@ func TestControllerReconcile(t *testing.T) {
 				revBaseNS, revAfterNS, hooksBaseNS, hooksAfterNS)
 			assert.Equal(t, revBaseNS, revAfterNS, "an apiserver-managed field must NOT add helm revisions")
 			assert.Equal(t, hooksBaseNS, hooksAfterNS, "an apiserver-managed field must NOT fire hooks")
+
+			// =========================================================
+			// (h) ADOPT MISSING-FROM-CURRENT — the exact live wedge. A resource that is RENDERED
+			// (target) and LIVE but ABSENT from the stored manifest (current). A child's CRD-version
+			// migration drops the old-GVK entry from `current` (kc.Build can't map the pruned version)
+			// while the CR stays live, so helm's Update hits original.Get()==nil and errors
+			// "no <kind> with the name <name> found" — wedging the reconcile forever (installer-cv2zwx7v
+			// lost KrateoFrontend/frontend exactly this way across the frontend v1-2-2 -> v1-3-2 bump).
+			// Reconcile step 4.7 must inject the live object into `current` and ADOPT it.
+			adoptedName := releaseName + "-adopted"
+			// Pre-create the ConfigMap LIVE, out-of-band, with a value the chart does NOT render, so the
+			// adopt produces a real patch. adopted was never rendered before -> absent from the manifest.
+			// It MUST carry this release's helm ownership metadata (managed-by=Helm + release-name/
+			// namespace), mirroring the live wedge: the umbrella's KrateoFrontend/frontend was helm-owned
+			// (release=installer-cv2zwx7v) yet missing from the stored manifest. Without ownership, helm's
+			// dry-run render (Reconcile step 2) rejects it at the import gate BEFORE step 4.7 can adopt it —
+			// which is a DIFFERENT failure than the one under test.
+			_, err = cs.CoreV1().ConfigMaps(namespace).Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      adoptedName,
+					Namespace: namespace,
+					Labels:    map[string]string{"app.kubernetes.io/managed-by": "Helm"},
+					Annotations: map[string]string{
+						"meta.helm.sh/release-name":      releaseName,
+						"meta.helm.sh/release-namespace": namespace,
+					},
+				},
+				Data: map[string]string{"note": "pre-existing-live"},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			// Sanity: it is live but NOT in the stored release manifest.
+			relBefore, err := cli.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
+			require.NoError(t, err)
+			require.NotContains(t, relBefore.Manifest, adoptedName,
+				"precondition: the adopted ConfigMap must be absent from the stored manifest")
+
+			cfgAdopt := func(note string) *helmconfig.UpgradeConfig {
+				return &helmconfig.UpgradeConfig{
+					ActionConfig: &helmconfig.ActionConfig{
+						TakeOwnership: true,
+						// Keep every other dimension at its current stable value so the ONLY change
+						// is the adopted ConfigMap appearing in the render.
+						Values: map[string]interface{}{
+							"color": "yellow", "token": "tok-CHANGED",
+							"adopted": true, "adoptedNote": note,
+						},
+					},
+				}
+			}
+
+			// The adopt reconcile MUST NOT error (this is the whole fix) and must patch the
+			// live object to the rendered value.
+			res, err = cli.Reconcile(ctx, releaseName, chartURL, cfgAdopt("adopted-render"))
+			require.NoError(t, err, "adopting a live target missing from the stored manifest must NOT error")
+			assert.True(t, res.Changed, "adopting + patching the pre-existing ConfigMap is a real change")
+			adoptedNote := func() string {
+				cm, e := cs.CoreV1().ConfigMaps(namespace).Get(ctx, adoptedName, metav1.GetOptions{})
+				require.NoError(t, e)
+				return cm.Data["note"]
+			}
+			assert.Equal(t, "adopted-render", adoptedNote(), "the adopted resource must be patched to the rendered value")
+			relAfter, err := cli.GetRelease(ctx, releaseName, &helmconfig.GetConfig{})
+			require.NoError(t, err)
+			assert.Contains(t, relAfter.Manifest, adoptedName,
+				"after adoption the resource must be captured in the stored manifest")
+			t.Logf("[adopt] Changed=%v note=%q now-in-manifest=%v", res.Changed, adoptedNote(), true)
+
+			// Follow-up steady reconcile: now tracked -> no-op, no error.
+			res, err = cli.Reconcile(ctx, releaseName, chartURL, cfgAdopt("adopted-render"))
+			require.NoError(t, err)
+			assert.False(t, res.Changed, "after adoption the resource is tracked -> steady no-op")
 
 			return ctx
 		}).
