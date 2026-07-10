@@ -10,10 +10,13 @@ import (
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v3/pkg/releaseutil"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/resource"
+	"sigs.k8s.io/yaml"
 )
 
 // traceparentAnnotation is the W3C trace-context annotation the helm post-renderer
@@ -82,6 +85,22 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		return &helmconfig.ReconcileResult{Changed: true, Release: rel}, nil
 	}
 	currentManifest := stored.Manifest
+
+	// 1.5. Repair the stored manifest against GVKs the cluster no longer serves. When a child's
+	// CompositionDefinition is bumped out-of-band PAST the umbrella's pin, the old served CRD
+	// version is pruned; the stored manifest still references it, so helm's OWN current-manifest
+	// Build inside the step-2 dry-run Upgrade fails hard ("unable to build kubernetes objects from
+	// current release manifest: no matches for kind ... ensure CRDs are installed first") before
+	// the reconcile can run — a deadlock a controller restart does NOT clear. We drop the
+	// unmappable entries (using the SAME REST mapper helm uses, so we drop exactly what it can't
+	// build) and persist the repaired release, so the render proceeds. Each dropped child is live
+	// at the NEW version and is re-adopted by step 4.7 below; the next real Upgrade (step 7)
+	// rewrites the manifest with the served versions, after which this is a no-op.
+	if repaired, dropped, rerr := c.dropUnservedFromStoredManifest(ctx, cfg, releaseName, currentManifest); rerr != nil {
+		return nil, fmt.Errorf("reconcile: repairing stored manifest: %w", rerr)
+	} else if len(dropped) > 0 {
+		currentManifest = repaired
+	}
 
 	// 2. Render the target manifest via a server-side dry-run Upgrade (no
 	//    revision written, no hooks run). This is ONLY how we obtain the
@@ -364,6 +383,75 @@ func strippedJSON(obj runtime.Object) ([]byte, error) {
 func infoKey(info *resource.Info) string {
 	gvk := info.Object.GetObjectKind().GroupVersionKind()
 	return fmt.Sprintf("%s/%s/%s/%s", gvk.GroupVersion().String(), gvk.Kind, info.Namespace, info.Name)
+}
+
+// filterUnmappableManifestDocs splits a helm manifest into documents and drops any whose GVK
+// the given RESTMapper cannot resolve — i.e. an apiVersion the cluster no longer serves. It
+// returns the rejoined manifest of the KEPT docs and the list of dropped GVKs (as
+// "group/version, Kind=..." strings). Documents whose header cannot be parsed are kept, never
+// dropped blindly. Pure (no I/O) so it is unit-testable with a fake mapper; the persisting
+// wrapper is dropUnservedFromStoredManifest.
+func filterUnmappableManifestDocs(manifest string, mapper apimeta.RESTMapper) (string, []string) {
+	kept := make([]string, 0)
+	var dropped []string
+	for _, doc := range releaseutil.SplitManifests(manifest) {
+		if strings.TrimSpace(doc) == "" {
+			continue
+		}
+		var head struct {
+			APIVersion string `json:"apiVersion"`
+			Kind       string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &head); err != nil || head.Kind == "" || head.APIVersion == "" {
+			kept = append(kept, doc) // unparseable header -> keep (never drop blindly)
+			continue
+		}
+		gv, err := schema.ParseGroupVersion(head.APIVersion)
+		if err != nil {
+			kept = append(kept, doc)
+			continue
+		}
+		if _, err := mapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: head.Kind}, gv.Version); err != nil {
+			dropped = append(dropped, gv.WithKind(head.Kind).String())
+			continue
+		}
+		kept = append(kept, doc)
+	}
+	if len(dropped) == 0 {
+		return manifest, nil
+	}
+	return strings.Join(kept, "\n---\n"), dropped
+}
+
+// dropUnservedFromStoredManifest removes resources whose GVK the cluster no longer serves from
+// the stored release manifest and, if any were dropped, PERSISTS the repaired manifest back to
+// the release store so helm's own current-manifest Build (in the step-2 dry-run Upgrade)
+// succeeds. It builds an action config with the SAME arguments Upgrade uses, so it shares the
+// REST mapper (drops precisely what helm cannot build) and the release storage (the k8s
+// Secrets that Upgrade reads). See the step-1.5 comment in Reconcile for why. Returns the
+// (possibly unchanged) manifest and the dropped GVKs.
+func (c *client) dropUnservedFromStoredManifest(ctx context.Context, cfg *helmconfig.UpgradeConfig, releaseName, manifest string) (string, []string, error) {
+	actionConfig, err := c.newActionConfig(ctx, c.namespace, c.restConfig, cfg.ActionConfig)
+	if err != nil {
+		return manifest, nil, fmt.Errorf("building action config: %w", err)
+	}
+	mapper, err := actionConfig.RESTClientGetter.ToRESTMapper()
+	if err != nil {
+		return manifest, nil, fmt.Errorf("rest mapper: %w", err)
+	}
+	repaired, dropped := filterUnmappableManifestDocs(manifest, mapper)
+	if len(dropped) == 0 {
+		return manifest, nil, nil
+	}
+	rel, err := actionConfig.Releases.Last(releaseName)
+	if err != nil {
+		return manifest, dropped, fmt.Errorf("load release for repair: %w", err)
+	}
+	rel.Manifest = repaired
+	if err := actionConfig.Releases.Update(rel); err != nil {
+		return manifest, dropped, fmt.Errorf("persist repaired release: %w", err)
+	}
+	return repaired, dropped, nil
 }
 
 // resourceVersionOf extracts metadata.resourceVersion from a runtime.Object
