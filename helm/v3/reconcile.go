@@ -171,6 +171,34 @@ func (c *client) Reconcile(ctx context.Context, releaseName, chartRef string, cf
 		normalizeSecretStringData(info.Object)
 	}
 
+	// 4.7. Drop "current" resources superseded by a GVK migration. When a child changes
+	// apiVersion between the stored release and the fresh render — e.g. a CRD version bump
+	// (composition.krateo.io/v1-2-2 -> v1-3-2) after a component version change — the stored
+	// manifest still pins the OLD GVK while the target carries the NEW one. Left in `current`,
+	// helm's three-way merge sees the old-GVK entry as "removed" and tries to DELETE it, but the
+	// old CRD version is no longer served, so the delete fails NotFound and the whole reconcile
+	// errors — wedging this AND every future reconcile, because the stored manifest never
+	// advances past the dead GVK. These are the SAME logical object migrating versions: the
+	// target's new-GVK entry updates the migrated live object (helm GETs each target and patches
+	// when it exists), so the stale old-GVK entry must be skipped, not deleted. Match on
+	// Kind+Namespace+Name (version-independent) with a differing apiVersion.
+	if len(current) > 0 {
+		targetGVK := make(map[string]string, len(target))
+		for _, info := range target {
+			gvk := info.Mapping.GroupVersionKind
+			targetGVK[gvk.Kind+"\x00"+info.Namespace+"\x00"+info.Name] = gvk.GroupVersion().String()
+		}
+		kept := make(kube.ResourceList, 0, len(current))
+		for _, info := range current {
+			gvk := info.Mapping.GroupVersionKind
+			if tv, ok := targetGVK[gvk.Kind+"\x00"+info.Namespace+"\x00"+info.Name]; ok && tv != gvk.GroupVersion().String() {
+				continue // superseded by a GVK migration — target updates the migrated live object
+			}
+			kept = append(kept, info)
+		}
+		current = kept
+	}
+
 	// 5. Self-healing merge: creates children deleted out-of-band, reverts field drift. This is the
 	// only mutation. UpdateThreeWayMerge (NOT Update) so UNSTRUCTURED/CR children get helm's
 	// three-way-with-live merge; the concrete *kube.Client implements the compat-split
