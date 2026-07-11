@@ -308,8 +308,28 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 		if prop.Title != "" {
 			st.AddLineComment("+kubebuilder:title:=%s", prop.Title)
 		}
+		renderedOwnDefault := false
 		if prop.Default != nil {
-			st.AddLineComment("+kubebuilder:default:=%s", stringsutils.DefaultValForKubebuilder(prop.Default))
+			if dv := stringsutils.DefaultValForKubebuilder(prop.Default); dv != "" {
+				st.AddLineComment("+kubebuilder:default:=%s", dv)
+				renderedOwnDefault = true
+			}
+		}
+		// roadmap#235: an optional object property that carries nested defaults but no renderable
+		// default of its own is synthesized with an empty-object default, so the apiserver
+		// materializes the parent and the nested defaults below it are then applied — no admission
+		// webhook required. Covers both "no own default" and "own default present but not renderable
+		// on this release line" (e.g. an object-valued default, which DefaultValForKubebuilder maps
+		// to "" here) — in both cases the nested defaults would otherwise vanish.
+		//
+		// Gated on `optional`: a REQUIRED parent has no #235 problem (if present its children are
+		// defaulted; if absent the apiserver rejects) — synthesizing a default there would silently
+		// relax the author's `required`. Gated on shouldSynthesizeEmptyDefault so `{}` is only
+		// emitted when the empty object is still valid (never turning a previously-valid omission
+		// into a validation error). Emitted as the literal `{}` (controller-gen accepts it, and this
+		// does not depend on DefaultValForKubebuilder's map handling).
+		if !renderedOwnDefault && optional && co.shouldSynthesizeEmptyDefault(prop) {
+			st.AddLineComment("+kubebuilder:default:={}")
 		}
 		if prop.Examples != nil {
 			st.AddLineComment("+kubebuilder:example:=%s", stringsutils.ExampleValForKubebuilder(prop.Examples))
@@ -349,6 +369,145 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 	}
 
 	return nil
+}
+
+// shouldSynthesizeEmptyDefault decides whether an object property that carries NO default of its
+// own should still receive a synthesized `+kubebuilder:default:={}`. This is the webhookless fix
+// for nested defaulting (krateoplatformops/roadmap#235): a JSON-Schema `default` on a field nested
+// under an optional object is dropped by the apiserver unless the parent object is itself
+// materialized, because the apiserver applies defaults top-down and never invents an omitted
+// parent. Emitting an empty-object default on the parent makes the apiserver create it, after which
+// the nested defaults are applied.
+//
+// It returns true only when ALL of:
+//   - t models an object (inline or via a resolvable $ref); nullable objects (type ["null","object"]
+//     with properties) are intentionally included — synthesizing `{}` on omission is what lets a
+//     nested default reach them; an EXPLICIT null is still preserved (defaulting only fills absentees);
+//   - some node strictly below t carries a `default` (so there is something to preserve);
+//   - the empty object `{}` is still schema-valid for t (emptyObjectIsValid).
+//
+// Known limitations (all verified non-harmful — they produce valid CRDs, never a controller-gen
+// failure or a previously-valid omission becoming invalid):
+//   - Array item defaults: a default reachable only through an array item is not recoverable by
+//     materializing the parent (the array is empty on omission), so synthesizing `{}` here is a
+//     harmless no-op that does not restore the item default.
+//   - Inline allOf/anyOf/oneOf: defaults living only inside inline (non-$ref) composition are never
+//     rendered into the CRD by the generator, so a `{}` synthesized on their account is a harmless
+//     no-op. Composition merged via $defs is handled correctly.
+//   - additionalProperties (map value) defaults: not traversed; crdgen already renders such maps as
+//     x-kubernetes-preserve-unknown-fields, discarding per-value defaults independently of this fix.
+func (co *typesCoder) shouldSynthesizeEmptyDefault(t *schemas.Type) bool {
+	return co.isObjectSchema(t) &&
+		co.subtreeHasDefault(t) &&
+		co.emptyObjectIsValid(t, map[*schemas.Type]bool{})
+}
+
+// isObjectSchema reports whether t models a JSON object with named properties (inline or via a
+// resolvable $ref).
+func (co *typesCoder) isObjectSchema(t *schemas.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Ref != "" {
+		if r, err := resolveRefDefs(t, co.resolvedDefs, map[string]bool{}); err == nil && r != nil && r.Ref == "" {
+			return co.isObjectSchema(r)
+		}
+		return false // unresolvable $ref: treat conservatively as non-object
+	}
+	return len(t.Properties) > 0 || t.Type.Equals(schemas.TypeList{"object"})
+}
+
+// subtreeHasDefault reports whether any node strictly BELOW t (its properties/items/composition
+// subschemas, transitively, following $refs) carries a JSON-Schema `default`. t's own Default is
+// intentionally ignored — the caller uses this to decide whether a parent that lacks a default must
+// nonetheless be materialized to reach the defaults underneath it.
+func (co *typesCoder) subtreeHasDefault(t *schemas.Type) bool {
+	return co.anyDefault(t, map[*schemas.Type]bool{}, false)
+}
+
+func (co *typesCoder) anyDefault(t *schemas.Type, seen map[*schemas.Type]bool, includeSelf bool) bool {
+	if t == nil || seen[t] {
+		return false
+	}
+	seen[t] = true
+
+	if includeSelf && t.Default != nil {
+		return true
+	}
+	if t.Ref != "" {
+		if r, err := resolveRefDefs(t, co.resolvedDefs, map[string]bool{}); err == nil && r != nil && r.Ref == "" {
+			if co.anyDefault(r, seen, includeSelf) {
+				return true
+			}
+		}
+	}
+	for _, p := range t.Properties {
+		if co.anyDefault(p, seen, true) {
+			return true
+		}
+	}
+	if t.Items != nil && co.anyDefault(t.Items, seen, true) {
+		return true
+	}
+	for _, sub := range t.AllOf {
+		if co.anyDefault(sub, seen, true) {
+			return true
+		}
+	}
+	for _, sub := range t.AnyOf {
+		if co.anyDefault(sub, seen, true) {
+			return true
+		}
+	}
+	for _, sub := range t.OneOf {
+		if co.anyDefault(sub, seen, true) {
+			return true
+		}
+	}
+	return false
+}
+
+// emptyObjectIsValid reports whether defaulting object t to `{}` yields a value that still passes
+// schema validation. Because synthesis only ever materializes OPTIONAL fields (a required field is
+// never auto-defaulted — see the emission site; that preserves the author's `required`), the only
+// way an omitted `{}` can satisfy t's requireds is if EVERY required property carries its OWN
+// default. A required property without its own default — scalar, array, OR object — makes `{}`
+// invalid (it would be left absent and rejected), so the parent must NOT be synthesized. This is the
+// key guard: it prevents turning a previously-valid omission of t into a validation error, and it is
+// what the roadmap#235 adversarial review confirmed must hold for a required child object with no own
+// default (a defaulted sibling must not drag the parent into an unsatisfiable `{}`).
+//
+// NOTE — validity is proven from t.Required ONLY. It deliberately ignores object-cardinality and
+// composition constraints (minProperties, oneOf/anyOf/dependentRequired, additionalProperties:false)
+// because crdgen does not emit those as CRD markers, so an omitted `{}` cannot violate them in the
+// generated schema. If crdgen ever gains marker fidelity for those, this guard must be extended
+// (e.g. reject when MinProperties>=1 is unmet by defaulting) before that ships.
+func (co *typesCoder) emptyObjectIsValid(t *schemas.Type, seen map[*schemas.Type]bool) bool {
+	if t == nil {
+		return true
+	}
+	if t.Ref != "" {
+		r, err := resolveRefDefs(t, co.resolvedDefs, map[string]bool{})
+		if err != nil || r == nil || r.Ref != "" {
+			return false // unresolvable $ref: cannot prove `{}` is valid, so stay conservative
+		}
+		return co.emptyObjectIsValid(r, seen)
+	}
+	if seen[t] {
+		return true // cycle: assume satisfiable, the deeper node already carries the burden of proof
+	}
+	seen[t] = true
+
+	for _, req := range t.Required {
+		p := t.Properties[req]
+		if p == nil || p.Default == nil {
+			// A required property that is undescribed or lacks its OWN default cannot be satisfied by
+			// materializing the parent as `{}` (we never auto-default a required field), so `{}` would
+			// be rejected. Do not synthesize.
+			return false
+		}
+	}
+	return true
 }
 
 // helper per convertire $ref in nome struct
