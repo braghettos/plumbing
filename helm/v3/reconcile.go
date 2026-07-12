@@ -10,6 +10,7 @@ import (
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	helmconfig "github.com/krateoplatformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/releaseutil"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -439,19 +440,42 @@ func (c *client) dropUnservedFromStoredManifest(ctx context.Context, cfg *helmco
 	if err != nil {
 		return manifest, nil, fmt.Errorf("rest mapper: %w", err)
 	}
-	repaired, dropped := filterUnmappableManifestDocs(manifest, mapper)
+	// Repair the SAME revision helm's Upgrade builds its "current" manifest from (see
+	// selectCurrentForBuild / helm upgrade.go prepareUpgrade) and filter THAT revision's manifest.
+	// Blindly repairing Last() was the bug: when a `failed`/`superseded` revision sits above the
+	// `deployed` one, helm builds Deployed while we fixed Last, so the "no matches for kind" wedge
+	// survived (observed on an Installer release whose `deployed` revision still pinned a pruned
+	// child apiVersion, under a `failed` revision on top).
+	last, err := actionConfig.Releases.Last(releaseName)
+	if err != nil {
+		return manifest, nil, fmt.Errorf("load release for repair: %w", err)
+	}
+	rel := selectCurrentForBuild(last, func() (*release.Release, error) {
+		return actionConfig.Releases.Deployed(releaseName)
+	})
+	repaired, dropped := filterUnmappableManifestDocs(rel.Manifest, mapper)
 	if len(dropped) == 0 {
 		return manifest, nil, nil
-	}
-	rel, err := actionConfig.Releases.Last(releaseName)
-	if err != nil {
-		return manifest, dropped, fmt.Errorf("load release for repair: %w", err)
 	}
 	rel.Manifest = repaired
 	if err := actionConfig.Releases.Update(rel); err != nil {
 		return manifest, dropped, fmt.Errorf("persist repaired release: %w", err)
 	}
 	return repaired, dropped, nil
+}
+
+// selectCurrentForBuild returns the revision whose manifest helm's Upgrade builds as the "current"
+// state, mirroring helm upgrade.go prepareUpgrade: the last revision when it is Deployed, else the
+// last Deployed revision, else (none Deployed) the last. deployed is called lazily so it is only
+// queried when the last revision is not itself Deployed.
+func selectCurrentForBuild(last *release.Release, deployed func() (*release.Release, error)) *release.Release {
+	if last != nil && last.Info != nil && last.Info.Status == release.StatusDeployed {
+		return last
+	}
+	if dep, err := deployed(); err == nil && dep != nil {
+		return dep
+	}
+	return last
 }
 
 // resourceVersionOf extracts metadata.resourceVersion from a runtime.Object
