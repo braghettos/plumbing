@@ -55,6 +55,11 @@ func applyUpgradeConfig(client *action.Upgrade, namespace string, cfg *helmconfi
 	client.Wait = cfg.Wait
 	client.Atomic = cfg.Atomic
 	client.Force = cfg.Force
+	// Adopt pre-existing, un-owned resources when the caller opts in — mirrors applyInstallConfig.
+	// Without this line cfg.TakeOwnership was silently dropped on every Upgrade, so Helm's ownership
+	// gate (existingResourceConflict -> "invalid ownership metadata") kept firing even when the
+	// caller explicitly asked to adopt, defeating the CDC's intended reconcile self-healing.
+	client.TakeOwnership = cfg.TakeOwnership
 	client.Install = cfg.Install
 	client.MaxHistory = cfg.MaxHistory
 	client.Labels = cfg.Labels
