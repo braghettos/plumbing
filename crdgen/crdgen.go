@@ -55,5 +55,13 @@ func Generate(opts Options) (dat []byte, err error) {
 		return
 	}
 
-	return tools.GenerateCRDs(srcdir)
+	dat, err = tools.GenerateCRDs(srcdir)
+	if err != nil {
+		return
+	}
+	// Make controller-gen's output structurally valid: fill in `type: object` on
+	// object-shaped nodes it left type-less, and turn empty/opaque nodes into open
+	// objects. Without this the API server rejects the CRD for rich source schemas
+	// (e.g. loft/vcluster) with "type: Required value: must not be empty ...".
+	return sanitizeCRD(dat), nil
 }
