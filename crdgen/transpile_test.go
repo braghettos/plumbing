@@ -24,7 +24,6 @@ func genDirectVcluster(t *testing.T) *apiextensionsv1.CustomResourceDefinition {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	t.Setenv("CRDGEN_TRANSPILER", "direct")
 	out, err := Generate(Options{
 		Group:        "composition.krateo.io",
 		Version:      "0.36.0",
@@ -180,7 +179,6 @@ func TestDirectTranspiler_Deterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	t.Setenv("CRDGEN_TRANSPILER", "direct")
 	opts := Options{Group: "composition.krateo.io", Version: "0.36.0", Kind: "Vcluster",
 		SpecSchema: schemaBytes, StatusSchema: []byte(defaultStatusSchema)}
 	a, err := Generate(opts)
@@ -196,6 +194,56 @@ func TestDirectTranspiler_Deterministic(t *testing.T) {
 	}
 }
 
+// TestDirectTranspiler_NestedDefs proves a $ref to a $def nested INSIDE another $def
+// (#/$defs/Outer/$defs/Inner) resolves — not degraded to an open object.
+func TestDirectTranspiler_NestedDefs(t *testing.T) {
+	const src = `{
+	  "type": "object",
+	  "properties": { "outer": { "$ref": "#/$defs/Outer" } },
+	  "$defs": {
+	    "Outer": {
+	      "type": "object",
+	      "properties": { "inner": { "$ref": "#/$defs/Outer/$defs/Inner" } },
+	      "$defs": {
+	        "Inner": { "type": "object", "properties": { "magic": { "type": "string" } } }
+	      }
+	    }
+	  }
+	}`
+	out, err := Generate(Options{
+		Group: "test.krateo.io", Version: "v1", Kind: "Nested",
+		SpecSchema: []byte(src), StatusSchema: []byte(defaultStatusSchema),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(out, &crd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	props := specProps(t, &crd)
+	outer, ok := props["outer"]
+	if !ok {
+		t.Fatal("spec.outer missing")
+	}
+	inner, ok := outer.Properties["inner"]
+	if !ok {
+		t.Fatalf("spec.outer.inner missing; outer props=%v", keysOf(outer.Properties))
+	}
+	magic, ok := inner.Properties["magic"]
+	if !ok || magic.Type != "string" {
+		t.Errorf("nested $def #/$defs/Outer/$defs/Inner not resolved; inner props=%v", keysOf(inner.Properties))
+	}
+}
+
+func keysOf(m map[string]apiextensionsv1.JSONSchemaProps) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestDirectTranspiler_Corpus asserts the direct path produces an apiserver-accepted CRD for every
 // schema in testdata (breadth), via the built-in validation gate inside Generate.
 func TestDirectTranspiler_Corpus(t *testing.T) {
@@ -203,7 +251,6 @@ func TestDirectTranspiler_Corpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read testdata: %v", err)
 	}
-	t.Setenv("CRDGEN_TRANSPILER", "direct")
 	n := 0
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".schema.json") {

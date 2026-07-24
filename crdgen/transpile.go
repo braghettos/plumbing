@@ -94,13 +94,77 @@ type transpiler struct {
 	warnings []string
 }
 
-// collectRefs builds the $defs table keyed by full JSON pointer, using schemas.CollectAllDefinitions
-// (which also harvests nested $defs). Both draft ($defs) and legacy (definitions) pointers are keyed.
+// collectRefs builds the $defs table keyed by full JSON pointer. It indexes $defs at EVERY nesting
+// level — root, inside another $def (e.g. #/$defs/Outer/$defs/Inner), and anywhere in the property
+// tree — so a $ref to a nested $def resolves correctly. Pointers are canonicalized to the "$defs"
+// spelling; a $ref written with the legacy "definitions" keyword is normalized on lookup
+// (normalizeRefPointer). The structural walk never follows $ref nodes (they are leaves), so it
+// terminates.
 func (t *transpiler) collectRefs(s *schemas.Schema) {
-	for name, def := range schemas.CollectAllDefinitions(s) {
-		t.refs["#/$defs/"+name] = def
-		t.refs["#/definitions/"+name] = def
+	if s == nil {
+		return
 	}
+	// Root-level $defs live on the Schema wrapper, not on the root Type.
+	t.indexDefs(s.Definitions, "#")
+	t.indexRefs((*schemas.Type)(s.ObjectAsType), "#")
+}
+
+// indexDefs records each entry of a $defs map under base+"/$defs/<name>" and recurses into it so its
+// own nested $defs are captured too.
+func (t *transpiler) indexDefs(defs schemas.Definitions, base string) {
+	for name, def := range defs {
+		if def == nil {
+			continue
+		}
+		ptr := base + "/$defs/" + name
+		if _, seen := t.refs[ptr]; seen {
+			continue
+		}
+		t.refs[ptr] = def
+		t.indexRefs(def, ptr)
+	}
+}
+
+// indexRefs walks a node's $defs and structural children, indexing every $defs block it finds under
+// its JSON pointer.
+func (t *transpiler) indexRefs(node *schemas.Type, base string) {
+	if node == nil {
+		return
+	}
+	t.indexDefs(node.Definitions, base)
+	for k, p := range node.Properties {
+		t.indexRefs(p, base+"/properties/"+k)
+	}
+	for k, p := range node.PatternProperties {
+		t.indexRefs(p, base+"/patternProperties/"+k)
+	}
+	if node.Items != nil {
+		t.indexRefs(node.Items, base+"/items")
+	}
+	if node.AdditionalItems != nil {
+		t.indexRefs(node.AdditionalItems, base+"/additionalItems")
+	}
+	if node.AdditionalProperties != nil && node.AdditionalProperties.Type != nil {
+		t.indexRefs(node.AdditionalProperties.Type, base+"/additionalProperties")
+	}
+	for i, s := range node.AllOf {
+		t.indexRefs(s, fmt.Sprintf("%s/allOf/%d", base, i))
+	}
+	for i, s := range node.AnyOf {
+		t.indexRefs(s, fmt.Sprintf("%s/anyOf/%d", base, i))
+	}
+	for i, s := range node.OneOf {
+		t.indexRefs(s, fmt.Sprintf("%s/oneOf/%d", base, i))
+	}
+	if node.Not != nil {
+		t.indexRefs(node.Not, base+"/not")
+	}
+}
+
+// normalizeRefPointer canonicalizes a $ref to the "$defs" spelling so both #/$defs/... and the
+// legacy #/definitions/... resolve against the same index.
+func normalizeRefPointer(ref string) string {
+	return strings.ReplaceAll(ref, "/definitions/", "/$defs/")
 }
 
 func (t *transpiler) warn(path, reason string) {
@@ -116,18 +180,20 @@ func (t *transpiler) transpile(node *schemas.Type, path string, stack map[string
 
 	// $ref: inline the target (structural schemas may not contain $ref).
 	if node.Ref != "" {
-		if _, ok := t.refs[node.Ref]; !ok {
+		key := normalizeRefPointer(node.Ref)
+		target, ok := t.refs[key]
+		if !ok {
 			t.warn(path, "unresolved $ref "+node.Ref+" -> open object")
 			return openObject()
 		}
-		if stack[node.Ref] {
+		if stack[key] {
 			// Cycle: break exactly at the recursion edge.
 			t.warn(path, "cycle at "+node.Ref+" -> preserve-unknown")
 			return openObject()
 		}
-		stack[node.Ref] = true
-		out := t.transpile(t.refs[node.Ref], path, stack)
-		delete(stack, node.Ref)
+		stack[key] = true
+		out := t.transpile(target, path, stack)
+		delete(stack, key)
 		if node.Description != "" && out != nil {
 			out.Description = node.Description
 		}
