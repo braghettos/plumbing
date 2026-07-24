@@ -259,14 +259,31 @@ gating on the API server's own code and by closing the transpiler's mapping unde
 
 ### 8.5.1 "Compliant" == the apiserver's own validators (oracle gate)
 Structural-schema validity is *defined* by `k8s.io/apiextensions-apiserver`, so `Generate()` runs
-its output through those exact functions and **fails loudly** if they reject it — the generator
-cannot return a CRD the apiserver would refuse:
-- `apiextensions/validation.ValidateCustomResourceDefinition` — the whole-CRD admission check.
-- `apiserver/schema.NewStructural` + `apiserver/schema/validation.ValidateStructural` — the
-  structural ruleset (every object typed; no `$ref`; no bare `metadata`; valid `x-kubernetes-*`;
-  allowed `anyOf`/`oneOf` placement; …).
+its output through the **same function kube-apiserver runs on CRD admission** and **fails loudly**
+if it rejects — the generator cannot return a CRD the apiserver would refuse:
 
-The `apiextensions-apiserver` module version is **pinned**; compliance is version-relative, so CI
+```go
+// k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation (validation.go:75, v0.36.2)
+func ValidateCustomResourceDefinition(ctx context.Context, obj *apiextensions.CustomResourceDefinition) field.ErrorList
+```
+An empty `field.ErrorList` means "accepted"; a non-empty list is the rejection reasons. The
+apiserver's CRD registry strategy calls this same package, so this is the real admission check run
+ahead of time — not a re-implementation. Its `validationOptions` are all on
+(`requireStructuralSchema`, `requireOpenAPISchema`, `requireValidPropertyType`,
+`requirePrunedDefaults`, `requireAtomicSetType`, `requireMapListKeysMapSetValidation`, CEL env),
+and internally (validation.go:312) it calls `structuralschema.NewStructural(...)` +
+structural-validation — so the structural check is **subsumed** by this one umbrella call. The
+standalone `apiserver/schema.NewStructural` (`convert.go:38`) + `apiserver/schema.ValidateStructural`
+(`validation.go:79`) are used only to validate a bare schema node in unit tests.
+
+**Implementation caveat:** `ValidateCustomResourceDefinition` takes the **internal** type
+`apiextensions.CustomResourceDefinition`, not the served `apiextensionsv1.CustomResourceDefinition`.
+The gate builds the v1 CRD, converts via
+`apiextensionsv1.Convert_v1_CustomResourceDefinition_To_apiextensions_CustomResourceDefinition`, then
+validates.
+
+The `apiextensions-apiserver` module version is **pinned**; the rules evolve release-to-release
+(e.g. CEL via `environment.DefaultCompatibilityVersion()`), so compliance is version-relative and CI
 tests against the **min and max k8s versions Krateo supports** (matrix).
 
 ### 8.5.2 Compliance is closed under the mapping (by construction)
