@@ -131,6 +131,17 @@ func (t *transpiler) indexRefs(node *schemas.Type, base string) {
 	if node == nil {
 		return
 	}
+	// Plain-name fragment anchors ($anchor / $dynamicAnchor) are addressable as "#<name>".
+	if node.Anchor != "" {
+		if _, seen := t.refs["#"+node.Anchor]; !seen {
+			t.refs["#"+node.Anchor] = node
+		}
+	}
+	if node.DynamicAnchor != "" {
+		if _, seen := t.refs["#"+node.DynamicAnchor]; !seen {
+			t.refs["#"+node.DynamicAnchor] = node
+		}
+	}
 	t.indexDefs(node.Definitions, base)
 	for k, p := range node.Properties {
 		t.indexRefs(p, base+"/properties/"+k)
@@ -178,17 +189,27 @@ func (t *transpiler) transpile(node *schemas.Type, path string, stack map[string
 		return openObject()
 	}
 
-	// $ref: inline the target (structural schemas may not contain $ref).
-	if node.Ref != "" {
-		key := normalizeRefPointer(node.Ref)
+	// $ref (and the $dynamicRef/$recursiveRef static fallback): inline the target — structural
+	// schemas may not contain $ref. $dynamicRef/$recursiveRef cannot be resolved by runtime scope
+	// here, so we resolve them statically against the matching $dynamicAnchor/$anchor (the bootstrap
+	// fallback), degrading to preserve-unknown if there is none.
+	ref := node.Ref
+	if ref == "" {
+		ref = node.DynamicRef
+	}
+	if ref == "" {
+		ref = node.RecursiveRef
+	}
+	if ref != "" {
+		key := normalizeRefPointer(ref)
 		target, ok := t.refs[key]
 		if !ok {
-			t.warn(path, "unresolved $ref "+node.Ref+" -> open object")
+			t.warn(path, "unresolved $ref "+ref+" -> open object")
 			return openObject()
 		}
 		if stack[key] {
 			// Cycle: break exactly at the recursion edge.
-			t.warn(path, "cycle at "+node.Ref+" -> preserve-unknown")
+			t.warn(path, "cycle at "+ref+" -> preserve-unknown")
 			return openObject()
 		}
 		stack[key] = true
@@ -207,14 +228,28 @@ func (t *transpiler) transpile(node *schemas.Type, path string, stack map[string
 
 	// allOf: deep-merge members onto the base node.
 	if len(node.AllOf) > 0 {
-		merged := t.transpileAllOf(node, path, stack)
-		return merged
+		return t.transpileAllOf(node, path, stack)
 	}
 
-	// Resolve the (possibly nullable) primary type.
+	// x-kubernetes-int-or-string: a structural int-or-string node carries no `type`.
+	if node.XIntOrString {
+		out.XIntOrString = true
+		if node.Title != "" {
+			out.Title = node.Title
+		}
+		return out
+	}
+
+	// Resolve the (possibly nullable) primary type. OAS 3.0 `nullable` and JSON Schema
+	// type:["x","null"] both map to structural `nullable`.
 	typ, nullable := primaryType(node.Type)
-	if nullable {
+	if nullable || node.Nullable {
 		out.Nullable = true
+	}
+	// Infer a type when none is declared but a value keyword implies one (const/enum/properties/
+	// items/conditionals) so the node stays structural instead of degrading to an open object.
+	if typ == "" {
+		typ = inferType(node)
 	}
 
 	switch {
@@ -256,10 +291,8 @@ func (t *transpiler) transpile(node *schemas.Type, path string, stack map[string
 				break
 			}
 		}
-		if len(node.Enum) > 0 {
-			// Bare enum without a declared type — carry values, leave type empty is invalid
-			// structurally, so degrade to open object with the enum dropped.
-			t.warn(path, "enum without type -> open object")
+		if node.Not != nil {
+			t.warn(path, "not without a typed node -> open object (constraint dropped)")
 		}
 		return openObject()
 	}
@@ -267,20 +300,23 @@ func (t *transpiler) transpile(node *schemas.Type, path string, stack map[string
 	// Common keywords valid on any node.
 	t.copyEnum(out, node, path)
 	t.copyDefault(out, node, path)
+	t.copyConst(out, node, path) // const -> enum (single value)
+	if node.Title != "" {
+		out.Title = node.Title
+	}
+	t.copyExample(out, node, path)
+	t.passthroughExtensions(out, node) // x-kubernetes-* carried in the input schema
 
 	// Constraint-only unions are allowed alongside a typed node.
 	if len(node.OneOf) > 0 || len(node.AnyOf) > 0 {
 		t.attachUnion(out, node, path, stack)
 	}
 
-	// Structural schemas cannot express these; drop + widen so content is not silently pruned.
-	if len(node.PatternProperties) > 0 {
-		t.warn(path, "patternProperties unsupported -> preserve-unknown")
-		out.XPreserveUnknownFields = boolPtr(true)
-	}
-	if node.Not != nil || len(node.DependentRequired) > 0 || len(node.DependentSchemas) > 0 {
-		t.warn(path, "not/dependentRequired/dependentSchemas unsupported -> dropped")
-	}
+	// Conditional / dependency keywords: expressed as CEL where tractable, else degraded (warned).
+	t.emitDependentRequired(out, node, path)
+	t.emitNot(out, node, path)
+	t.emitIfThenElse(out, node, path)
+	t.handleUnsupported(out, node, path)
 
 	return out
 }

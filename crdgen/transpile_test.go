@@ -236,6 +236,75 @@ func TestDirectTranspiler_NestedDefs(t *testing.T) {
 	}
 }
 
+// TestDirectTranspiler_2020_12 exercises const, dependentRequired/if-then/not via CEL, OAS-3.0
+// nullable, and x-kubernetes-* passthrough. Generation succeeding means the apiserver's own
+// validation gate accepted the CRD AND compiled every generated CEL rule.
+func TestDirectTranspiler_2020_12(t *testing.T) {
+	const src = `{
+	  "type": "object",
+	  "properties": {
+	    "mode":     { "type": "string", "const": "prod" },
+	    "replicas": { "type": "integer", "nullable": true },
+	    "port":     { "x-kubernetes-int-or-string": true },
+	    "tls":      { "type": "boolean" },
+	    "cert":     { "type": "string" },
+	    "key":      { "type": "string" },
+	    "region":   { "type": "string", "not": { "enum": ["banned"] } },
+	    "list": {
+	      "type": "array",
+	      "x-kubernetes-list-type": "map",
+	      "x-kubernetes-list-map-keys": ["name"],
+	      "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
+	    },
+	    "custom": {
+	      "type": "object",
+	      "properties": { "a": { "type": "integer" } },
+	      "x-kubernetes-validations": [ { "rule": "self.a > 0", "message": "a must be positive" } ]
+	    }
+	  },
+	  "dependentRequired": { "tls": ["cert", "key"] },
+	  "if":   { "properties": { "mode": { "const": "prod" } }, "required": ["mode"] },
+	  "then": { "required": ["replicas"] }
+	}`
+	out, err := Generate(Options{
+		Group: "test.krateo.io", Version: "v1", Kind: "Cov",
+		SpecSchema: []byte(src), StatusSchema: []byte(defaultStatusSchema),
+	})
+	if err != nil {
+		t.Fatalf("generate (gate rejected — likely bad generated CEL): %v", err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(out, &crd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	root := crd.Spec.Versions[0].Schema.OpenAPIV3Schema
+	spec := root.Properties["spec"]
+	p := spec.Properties
+
+	if got := p["mode"].Enum; len(got) != 1 || string(got[0].Raw) != `"prod"` {
+		t.Errorf("const not mapped to single-value enum; mode.enum=%v", got)
+	}
+	if !p["replicas"].Nullable {
+		t.Errorf("nullable:true not carried on replicas")
+	}
+	if !p["port"].XIntOrString {
+		t.Errorf("x-kubernetes-int-or-string not carried on port")
+	}
+	if p["list"].XListType == nil || *p["list"].XListType != "map" || len(p["list"].XListMapKeys) != 1 {
+		t.Errorf("x-kubernetes-list-type/list-map-keys not carried; list=%+v", p["list"])
+	}
+	if len(p["custom"].XValidations) != 1 || p["custom"].XValidations[0].Rule != "self.a > 0" {
+		t.Errorf("passthrough x-kubernetes-validations lost; custom.validations=%v", p["custom"].XValidations)
+	}
+	if len(p["region"].XValidations) == 0 {
+		t.Errorf("not -> CEL rule missing on region")
+	}
+	// dependentRequired + if/then produce CEL rules on the spec object.
+	if len(spec.XValidations) < 2 {
+		t.Errorf("expected dependentRequired + if/then CEL rules on spec; got %d: %v", len(spec.XValidations), spec.XValidations)
+	}
+}
+
 func keysOf(m map[string]apiextensionsv1.JSONSchemaProps) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
