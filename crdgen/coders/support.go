@@ -180,8 +180,15 @@ func resolveRefDefs(t *schemas.Type, defs schemas.Definitions, visited map[strin
 
 	if t.Properties != nil {
 		newProps := make(map[string]*schemas.Type, len(t.Properties))
-		for k, v := range t.Properties {
-			r, err := resolveRefDefs(v, defs, visited)
+		// Deterministic order: resolveRefDefs shares a `visited` set, so the order
+		// properties are resolved decides which ref is expanded vs cached.
+		pkeys := make([]string, 0, len(t.Properties))
+		for k := range t.Properties {
+			pkeys = append(pkeys, k)
+		}
+		slices.Sort(pkeys)
+		for _, k := range pkeys {
+			r, err := resolveRefDefs(t.Properties[k], defs, visited)
 			if err != nil {
 				return nil, err
 			}
