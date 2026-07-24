@@ -47,6 +47,10 @@ func TestStartCRDInformer_Add_Update_Delete_InvokeInvalidate(t *testing.T) {
 	if err := crdInformer.Start(ctx); err != nil {
 		t.Fatalf("start informer: %v", err)
 	}
+	// Let the informer's initial List complete and its Watch establish before mutating; otherwise the
+	// Create/Update/Delete race watch setup and events are missed (the fake client does not replay
+	// missed events). A real apiserver + long-lived informer does not hit this in production.
+	time.Sleep(500 * time.Millisecond)
 
 	// create a CRD
 	crd := &apixv1.CustomResourceDefinition{
@@ -71,7 +75,7 @@ func TestStartCRDInformer_Add_Update_Delete_InvokeInvalidate(t *testing.T) {
 		},
 	}
 
-	_, err := fakeClient.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{})
+	created, err := fakeClient.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create crd: %v", err)
 	}
@@ -81,8 +85,12 @@ func TestStartCRDInformer_Add_Update_Delete_InvokeInvalidate(t *testing.T) {
 		t.Fatalf("invalidate not called on CRD add")
 	}
 
-	updated := crd.DeepCopy()
+	// Update from the CREATED object (carrying its server-assigned resourceVersion) and bump it, so
+	// the informer observes a distinct Modified event — the fake client does not auto-bump RV, and
+	// without a changed RV the reflector never delivers the update (a real apiserver always bumps it).
+	updated := created.DeepCopy()
 	updated.Spec.PreserveUnknownFields = true
+	updated.ResourceVersion = "2"
 	_, err = fakeClient.ApiextensionsV1().CustomResourceDefinitions().Update(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("update crd: %v", err)
