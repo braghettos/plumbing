@@ -9,6 +9,14 @@ import (
 	"github.com/krateoplatformops/plumbing/env"
 )
 
+// NormalizeVersionName re-exports coders.NormalizeVersionName so callers importing only the crdgen
+// package can normalize a version string (e.g. an OAS info.version) to the CRD version name crdgen
+// would emit for it (e.g. "1.2.3" -> "v1-2-3"). Use it when deriving a GVK/GVR that must match the
+// generated CRD's version.
+func NormalizeVersionName(ver string) string {
+	return coders.NormalizeVersionName(ver)
+}
+
 type Options struct {
 	Group        string
 	Version      string
