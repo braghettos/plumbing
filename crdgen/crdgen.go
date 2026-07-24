@@ -28,6 +28,14 @@ type Options struct {
 }
 
 func Generate(opts Options) (dat []byte, err error) {
+	// Direct JSON-Schema -> structural-OpenAPI-v3 transpiler (crdgen/transpile.go). Opt-in via
+	// CRDGEN_TRANSPILER=direct while it is validated against the legacy Go-struct/controller-gen
+	// path (see crdgen/docs/ref-resolution-redesign.md). Faithful for $ref-heavy schemas and gated
+	// on the apiserver's own CRD validation.
+	if os.Getenv("CRDGEN_TRANSPILER") == "direct" {
+		return generateDirect(opts)
+	}
+
 	os.Setenv(coders.EnvFormatCode, "1")
 
 	// Use MkdirTemp instead of TempDir to create a unique temporary directory
