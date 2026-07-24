@@ -252,6 +252,54 @@ silent aliasing. Callers (core-provider/oasgen) can surface the warnings.
 
 ---
 
+## 8.5 Compliance assurance — how we guarantee the output is k8s-valid
+
+"100% compliant" is not asserted in prose; it is made **structurally impossible to violate** by
+gating on the API server's own code and by closing the transpiler's mapping under validity.
+
+### 8.5.1 "Compliant" == the apiserver's own validators (oracle gate)
+Structural-schema validity is *defined* by `k8s.io/apiextensions-apiserver`, so `Generate()` runs
+its output through those exact functions and **fails loudly** if they reject it — the generator
+cannot return a CRD the apiserver would refuse:
+- `apiextensions/validation.ValidateCustomResourceDefinition` — the whole-CRD admission check.
+- `apiserver/schema.NewStructural` + `apiserver/schema/validation.ValidateStructural` — the
+  structural ruleset (every object typed; no `$ref`; no bare `metadata`; valid `x-kubernetes-*`;
+  allowed `anyOf`/`oneOf` placement; …).
+
+The `apiextensions-apiserver` module version is **pinned**; compliance is version-relative, so CI
+tests against the **min and max k8s versions Krateo supports** (matrix).
+
+### 8.5.2 Compliance is closed under the mapping (by construction)
+Every transpiler rule emits either (a) a fragment from the keyword-mapping table, each of which is
+provably structural, or (b) a **degrade to `type: object` + `x-kubernetes-preserve-unknown-fields:
+true`**, which is *always* structurally valid. There is **no path** that emits an unvalidated
+construct. Worst case is explicit, logged fidelity loss — never a non-compliant schema. §8.5.1 is
+the belt to this suspenders.
+
+### 8.5.3 Two guarantees, both proven (acceptance ≠ fidelity)
+The original bug was "the CRD is *accepted*" masking "the CR is *pruned*." Both are gated:
+- **Acceptance:** §8.5.1 library oracle + a **real apiserver** test (envtest / kind,
+  `kubectl apply --dry-run=server`) across the supported version matrix.
+- **Fidelity / no-prune** (cluster-free, using the apiserver's own pruner): build a sample CR from
+  the source schema's defaults/examples, run `apiserver/schema/pruning.Prune(sampleCR, structural)`,
+  and assert it is a **no-op** (byte-identical in/out). This is exactly the check that would have
+  caught the vcluster empty-spec failure; it is cheap and deterministic.
+
+### 8.5.4 Breadth
+- **Corpus** (loft/vcluster 0.36, oasgen OAS-derived, existing goldens) through §8.5.1 + §8.5.3
+  every CI run.
+- **Property/fuzz:** bounded-random JSON Schemas → transpile → must pass the oracle and the
+  no-op-prune check; catches input classes hand-written tests miss.
+
+### 8.5.5 Honest bound
+"100%" over *all conceivable* inputs is not provable. What is guaranteed: the generator is gated by
+the apiserver's own validator (so it can never emit a rejected CRD), CI proves acceptance +
+no-prune fidelity on a real apiserver across the supported version range plus a corpus and a
+fuzzer, and anything inexpressible degrades to a provably-valid open object rather than risking
+rejection or silent loss.
+
+---
+
 ## 9. Rollout / migration
 
 1. **Implement behind a flag** (`CRDGEN_TRANSPILER=direct`), defaulting to the old path, so the two
