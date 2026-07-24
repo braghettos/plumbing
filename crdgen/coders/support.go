@@ -323,6 +323,14 @@ func exportedName(name string) string {
 //
 // Go package folders allow only underscore char ('_')
 // K8s CRD version allow only dash char ('-')
+// NormalizeVersionName converts an arbitrary version string (e.g. an OAS info.version like "1.2.3")
+// into the legal Kubernetes CRD version name that crdgen emits for it (e.g. "v1-2-3"). Callers
+// deriving a GVK/GVR outside crdgen MUST use this so their version matches the generated CRD's
+// version name. It is the exported wrapper over normalizeVersion with the '-' separator crdgen uses.
+func NormalizeVersionName(ver string) string {
+	return normalizeVersion(ver, '-')
+}
+
 func normalizeVersion(ver string, replaceChar rune) string {
 	ver = strings.ToLower(ver)
 
