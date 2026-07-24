@@ -86,9 +86,17 @@ func (co *typesCoder) parseSchemaForStatus(in []byte) (err error) {
 }
 
 func (co *typesCoder) buildStructForDefs() (err error) {
-	for name, def := range co.resolvedDefs {
-		err = co.buildStruct(name, def, nil)
-		if err != nil {
+	// Deterministic order: map iteration is randomized, and because ref resolution
+	// caches already-built structs as pointers, the order structs are built decides
+	// which $ref expands fully vs collapses to a pointer — so an unsorted range makes
+	// the whole generated CRD non-deterministic (content + size) across runs.
+	names := make([]string, 0, len(co.resolvedDefs))
+	for name := range co.resolvedDefs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if err = co.buildStruct(name, co.resolvedDefs[name], nil); err != nil {
 			return
 		}
 	}
@@ -97,7 +105,15 @@ func (co *typesCoder) buildStructForDefs() (err error) {
 }
 
 func (co *typesCoder) resolveAllOf(in *schemas.Schema, defs map[string]*schemas.Type) error {
-	for name, def := range defs {
+	// Deterministic order (map iteration is randomized; allOf resolution mutates
+	// shared def state, so order affects the result).
+	dnames := make([]string, 0, len(defs))
+	for name := range defs {
+		dnames = append(dnames, name)
+	}
+	slices.Sort(dnames)
+	for _, name := range dnames {
+		def := defs[name]
 		resolved := def
 		if len(def.AllOf) > 0 {
 			merged, err := schemas.AllOf(def.AllOf, in.Definitions)
@@ -287,7 +303,14 @@ func (co *typesCoder) buildStruct(typeName string, t *schemas.Type, applyFn ...f
 		fn(st)
 	}
 
-	for name, prop := range t.Properties {
+	// Deterministic field order (map iteration is randomized).
+	propNames := make([]string, 0, len(t.Properties))
+	for name := range t.Properties {
+		propNames = append(propNames, name)
+	}
+	slices.Sort(propNames)
+	for _, name := range propNames {
+		prop := t.Properties[name]
 		fieldName := exportedName(name)
 		fieldType := co.resolveType(fieldName, prop)
 
