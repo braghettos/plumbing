@@ -147,6 +147,17 @@ func (ap *AdditionalProperties) UnmarshalJSON(data []byte) error {
 // RFC draft-wright-json-schema-validation-00, section 5.26.
 type Definitions map[string]*Type
 
+// ValidationRule mirrors a k8s x-kubernetes-validations[] entry (a CEL rule). Used both for
+// passing through rules already present in the input schema and for emitting generated ones.
+type ValidationRule struct {
+	Rule              string  `json:"rule"`
+	Message           string  `json:"message,omitempty"`
+	MessageExpression string  `json:"messageExpression,omitempty"`
+	Reason            *string `json:"reason,omitempty"`
+	FieldPath         string  `json:"fieldPath,omitempty"`
+	OptionalOldSelf   *bool   `json:"optionalOldSelf,omitempty"`
+}
+
 type SubSchemaType string
 
 const (
@@ -202,6 +213,35 @@ type Type struct {
 	// RFC draft-handrews-json-schema-validation-02, appendix A.
 	Definitions      Definitions      `json:"$defs,omitempty"`
 	DependentSchemas map[string]*Type `json:"dependentSchemas,omitempty"`
+
+	// Draft 2019-09 / 2020-12 keywords.
+	Const                 any                   `json:"const,omitempty"`                 // draft-06
+	If                    *Type                 `json:"if,omitempty"`                    // draft-07
+	Then                  *Type                 `json:"then,omitempty"`                  // draft-07
+	Else                  *Type                 `json:"else,omitempty"`                  // draft-07
+	PrefixItems           []*Type               `json:"prefixItems,omitempty"`           // 2020-12 (tuple)
+	UnevaluatedProperties *AdditionalProperties `json:"unevaluatedProperties,omitempty"` // 2019-09
+	UnevaluatedItems      *Type                 `json:"unevaluatedItems,omitempty"`      // 2019-09
+	ContentEncoding       string                `json:"contentEncoding,omitempty"`
+	ContentMediaType      string                `json:"contentMediaType,omitempty"`
+	ContentSchema         *Type                 `json:"contentSchema,omitempty"`
+	Anchor                string                `json:"$anchor,omitempty"`          // 2019-09
+	DynamicRef            string                `json:"$dynamicRef,omitempty"`      // 2020-12
+	DynamicAnchor         string                `json:"$dynamicAnchor,omitempty"`   // 2020-12
+	RecursiveRef          string                `json:"$recursiveRef,omitempty"`    // 2019-09
+	RecursiveAnchor       bool                  `json:"$recursiveAnchor,omitempty"` // 2019-09
+
+	// OpenAPI v3.0 nullability (OAS 3.0 / oasgen use `nullable: true` instead of type ["x","null"]).
+	Nullable bool `json:"nullable,omitempty"`
+
+	// Kubernetes structural-schema extensions (the x-kubernetes-* keywords controller-gen emits from
+	// kubebuilder markers). Passed through to the CRD; XValidations also carries generated CEL rules.
+	XIntOrString      bool             `json:"x-kubernetes-int-or-string,omitempty"`
+	XEmbeddedResource bool             `json:"x-kubernetes-embedded-resource,omitempty"`
+	XListType         *string          `json:"x-kubernetes-list-type,omitempty"`
+	XListMapKeys      []string         `json:"x-kubernetes-list-map-keys,omitempty"`
+	XMapType          *string          `json:"x-kubernetes-map-type,omitempty"`
+	XValidations      []ValidationRule `json:"x-kubernetes-validations,omitempty"`
 
 	// TODO: add correct section where "readOnly" is mentioned in the spec
 	//       I'm not sure which section I should put here, but I did notice in the 2020-12 validation schema changelog,
