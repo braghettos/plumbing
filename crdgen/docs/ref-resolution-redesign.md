@@ -197,12 +197,22 @@ is applied **exactly at the recursion edge** (not to the whole subtree).
 | `items` | recursed; parent `type: array` |
 | `additionalProperties: {schema}` | recursed (**map value schema preserved**) |
 | `additionalProperties: true/absent on open node` | `x-kubernetes-preserve-unknown-fields: true` |
-| `enum`, `format`, `default`, `pattern`, `minimum/maximum`, `minLength/maxLength`, `multipleOf` | copied |
-| `description`, `title` | copied |
+| `enum`, `format`, `default`, `pattern`, `minimum/maximum`, `minLength/maxLength`, `multipleOf`, `minItems/maxItems`, `uniqueItems` | copied |
+| `description`, `title`, `examples` | copied (`examples[0]` → `example`) |
+| `const` | → single-value `enum` (type inferred from the value when undeclared) |
+| `nullable` (OAS 3.0) | → `nullable: true` (same as `type: [T,"null"]`) |
 | `allOf` | merged (§7.5) |
 | `oneOf`/`anyOf` | see §7.5 (structural-safe subset, else degrade) |
-| `$ref` | inlined (§7.2) |
-| `not`, `if/then/else`, `dependentRequired`, `dependentSchemas`, `patternProperties` | **degrade** to open object at that node + log (§7.8) |
+| `$ref` | inlined (§7.2); `$defs` indexed at every nesting level (incl. `#/$defs/A/$defs/B`); legacy `#/definitions/…` normalized |
+| `$anchor`, `$dynamicAnchor` | indexed as `#<name>`; `$ref`/`$dynamicRef`/`$recursiveRef` resolve against them (dynamic scope not modeled — static fallback) |
+| `dependentRequired` | → **CEL** `x-kubernetes-validations`: `!has(self.p) \|\| (has(self.a) && has(self.b))` |
+| `not` (scalar `const`/`enum`) | → **CEL** negation (`self != X` / `!(self in […])`); else degrade |
+| `if`/`then`/`else` (property `const`/`enum` + `required` conditions) | → **CEL**; else degrade |
+| `x-kubernetes-int-or-string` | → typeless int-or-string node |
+| `x-kubernetes-{embedded-resource,list-type,list-map-keys,map-type,validations}` | passed through (existing CEL rules preserved) |
+| `patternProperties`, `dependentSchemas`, `prefixItems` (tuple), `unevaluatedProperties/Items`, non-trivial `not`/`if` | **degrade** to open object + **warn** (§7.8) |
+
+Generated CEL only references fields that are declared (or on a preserve-unknown object) so every rule compiles; the §8.5 gate validates all CEL, so a bad rule fails generation rather than shipping.
 
 Every object node that has `properties` or an `additionalProperties` schema is emitted with
 `type: object` (structural requirement); genuinely open nodes get
