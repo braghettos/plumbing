@@ -30,17 +30,29 @@ func sanitizeCRD(dat []byte) []byte {
 	if root == nil {
 		return dat
 	}
+	changed := false
 	if versions := mapValue(mapValue(root, "spec"), "versions"); versions != nil && versions.Kind == yaml.SequenceNode {
 		for _, v := range versions.Content {
 			if oa := mapValue(mapValue(v, "schema"), "openAPIV3Schema"); oa != nil {
-				sanitizeNode(oa)
+				if sanitizeNode(oa) {
+					changed = true
+				}
 			}
 		}
 	}
-	out, err := yaml.Marshal(&doc)
-	if err != nil {
+	// If the CRD was already structurally valid, return it byte-for-byte — never
+	// re-serialize (and thus never reformat) a CRD we didn't need to fix.
+	if !changed {
 		return dat
 	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return dat
+	}
+	_ = enc.Close()
+	out := buf.Bytes()
 	// Preserve a leading document separator if controller-gen emitted one.
 	if bytes.HasPrefix(bytes.TrimLeft(dat, " \t\n"), []byte("---")) &&
 		!bytes.HasPrefix(bytes.TrimLeft(out, " \t\n"), []byte("---")) {
@@ -82,11 +94,13 @@ func mapPut(n *yaml.Node, key string, value *yaml.Node) {
 	n.Content = append(n.Content, scalar(key, "!!str"), value)
 }
 
-func sanitizeNode(n *yaml.Node) {
+// sanitizeNode fixes n in place and reports whether it (or any descendant) changed.
+func sanitizeNode(n *yaml.Node) bool {
 	if n == nil || n.Kind != yaml.MappingNode {
-		return
+		return false
 	}
 
+	changed := false
 	hasType := mapHas(n, "type")
 	props := mapValue(n, "properties")
 	ap := mapValue(n, "additionalProperties")
@@ -99,6 +113,7 @@ func sanitizeNode(n *yaml.Node) {
 	if !hasType && (hasProps || hasAPSchema) {
 		mapPut(n, "type", scalar("object", "!!str"))
 		hasType = true
+		changed = true
 	}
 
 	// Genuinely empty/opaque node -> open object.
@@ -108,32 +123,34 @@ func sanitizeNode(n *yaml.Node) {
 		!mapHas(n, "enum") && !mapHas(n, "format") {
 		mapPut(n, "type", scalar("object", "!!str"))
 		mapPut(n, "x-kubernetes-preserve-unknown-fields", scalar("true", "!!bool"))
+		changed = true
 	}
 
 	// Descend only through real schema positions.
 	if hasProps {
 		for i := 1; i < len(props.Content); i += 2 {
-			sanitizeNode(props.Content[i])
+			changed = sanitizeNode(props.Content[i]) || changed
 		}
 	}
 	if items != nil {
 		if items.Kind == yaml.MappingNode {
-			sanitizeNode(items)
+			changed = sanitizeNode(items) || changed
 		}
 		if items.Kind == yaml.SequenceNode {
 			for _, it := range items.Content {
-				sanitizeNode(it)
+				changed = sanitizeNode(it) || changed
 			}
 		}
 	}
 	if hasAPSchema {
-		sanitizeNode(ap)
+		changed = sanitizeNode(ap) || changed
 	}
 	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
 		if arr := mapValue(n, key); arr != nil && arr.Kind == yaml.SequenceNode {
 			for _, e := range arr.Content {
-				sanitizeNode(e)
+				changed = sanitizeNode(e) || changed
 			}
 		}
 	}
+	return changed
 }
