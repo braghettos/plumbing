@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	xcontext "github.com/krateoplatformops/plumbing/context"
-	"github.com/krateoplatformops/plumbing/env"
-	"github.com/krateoplatformops/plumbing/jwtutil"
-	"github.com/krateoplatformops/plumbing/kubeconfig"
-	"github.com/krateoplatformops/plumbing/logger"
-	"github.com/krateoplatformops/plumbing/signup"
+	xcontext "github.com/krateo-platformops/plumbing/context"
+	"github.com/krateo-platformops/plumbing/env"
+	"github.com/krateo-platformops/plumbing/jwtutil"
+	"github.com/krateo-platformops/plumbing/kubeconfig"
+	"github.com/krateo-platformops/plumbing/logger"
+	"github.com/krateo-platformops/plumbing/signup"
 
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/types"

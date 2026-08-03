@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/cache"
-	"github.com/krateoplatformops/plumbing/kubeutil/plurals"
+	"github.com/krateo-platformops/plumbing/cache"
+	"github.com/krateo-platformops/plumbing/kubeutil/plurals"
 	"github.com/stretchr/testify/assert"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"

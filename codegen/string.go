@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/krateoplatformops/plumbing/bufferpool"
+	"github.com/krateo-platformops/plumbing/bufferpool"
 )
 
 var pool = bufferpool.New(1024)

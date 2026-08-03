@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/eventbus"
-	"github.com/krateoplatformops/plumbing/kubeutil/discoveryevents"
+	"github.com/krateo-platformops/plumbing/eventbus"
+	"github.com/krateo-platformops/plumbing/kubeutil/discoveryevents"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"

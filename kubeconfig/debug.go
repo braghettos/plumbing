@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	xcontext "github.com/krateoplatformops/plumbing/context"
+	xcontext "github.com/krateo-platformops/plumbing/context"
 	"k8s.io/client-go/transport"
 )
 

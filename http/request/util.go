@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/endpoints"
 )
 
 // cloneRequest creates a shallow copy of the request along with a deep copy of the Headers.

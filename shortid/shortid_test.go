@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/shortid"
+	"github.com/krateo-platformops/plumbing/shortid"
 )
 
 func Test_onGetDefault_defaultInstance(t *testing.T) {

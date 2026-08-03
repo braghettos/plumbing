@@ -3,7 +3,7 @@ package utils
 import (
 	"fmt"
 
-	"github.com/krateoplatformops/plumbing/maps"
+	"github.com/krateo-platformops/plumbing/maps"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )

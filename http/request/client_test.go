@@ -3,7 +3,7 @@ package request
 import (
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/endpoints"
 )
 
 func TestHTTPClientForEndpoint(t *testing.T) {

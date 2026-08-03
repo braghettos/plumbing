@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
-	xenv "github.com/krateoplatformops/plumbing/env"
-	"github.com/krateoplatformops/plumbing/kubeutil"
+	xenv "github.com/krateo-platformops/plumbing/env"
+	"github.com/krateo-platformops/plumbing/kubeutil"
 	"github.com/stretchr/testify/assert"
 
 	"sigs.k8s.io/e2e-framework/pkg/env"

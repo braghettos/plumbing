@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
-	"github.com/krateoplatformops/plumbing/helm/getter"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
+	"github.com/krateo-platformops/plumbing/helm/getter"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/krateoplatformops/plumbing/jwtutil"
+	"github.com/krateo-platformops/plumbing/jwtutil"
 	"github.com/stretchr/testify/assert"
 )
 

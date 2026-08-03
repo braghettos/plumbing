@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/endpoints"
 )
 
 func TestCloneRequest(t *testing.T) {

@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/certs"
-	"github.com/krateoplatformops/plumbing/endpoints"
-	"github.com/krateoplatformops/plumbing/kubeutil"
+	"github.com/krateo-platformops/plumbing/certs"
+	"github.com/krateo-platformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/kubeutil"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"

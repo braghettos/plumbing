@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/krateoplatformops/plumbing/helm/getter/repo"
+	"github.com/krateo-platformops/plumbing/helm/getter/repo"
 )
 
 var _ Getter = (*repoGetter)(nil)

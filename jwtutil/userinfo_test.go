@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/jwtutil"
+	"github.com/krateo-platformops/plumbing/jwtutil"
 	"github.com/stretchr/testify/require"
 )
 

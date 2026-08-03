@@ -11,8 +11,8 @@ import (
 	"net/url"
 	"time"
 
-	xcontext "github.com/krateoplatformops/plumbing/context"
-	"github.com/krateoplatformops/plumbing/endpoints"
+	xcontext "github.com/krateo-platformops/plumbing/context"
+	"github.com/krateo-platformops/plumbing/endpoints"
 )
 
 func tlsConfigFor(ep *endpoints.Endpoint) (http.RoundTripper, error) {

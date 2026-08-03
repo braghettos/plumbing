@@ -16,7 +16,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
-	"github.com/krateoplatformops/plumbing/crdgen/schemas"
+	"github.com/krateo-platformops/plumbing/crdgen/schemas"
 )
 
 var celIdent = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)

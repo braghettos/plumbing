@@ -6,7 +6,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/krateoplatformops/plumbing/eventbus"
+	"github.com/krateo-platformops/plumbing/eventbus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/endpoints"
 )
 
 func TestTraceId(t *testing.T) {

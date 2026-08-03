@@ -1,4 +1,4 @@
-module github.com/krateoplatformops/plumbing
+module github.com/krateo-platformops/plumbing
 
 go 1.25.6
 

@@ -3,7 +3,7 @@ package ptr_test
 import (
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/ptr"
+	"github.com/krateo-platformops/plumbing/ptr"
 )
 
 func TestRef(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/releaseutil"

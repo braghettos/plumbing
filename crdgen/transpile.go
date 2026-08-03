@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
 
-	"github.com/krateoplatformops/plumbing/crdgen/schemas"
+	"github.com/krateo-platformops/plumbing/crdgen/schemas"
 )
 
 const (

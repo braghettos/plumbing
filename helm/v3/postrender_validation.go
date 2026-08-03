@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/kube"
 	"k8s.io/cli-runtime/pkg/resource"
 )

@@ -10,11 +10,11 @@ import (
 	"sort"
 	"strings"
 
-	xcontext "github.com/krateoplatformops/plumbing/context"
-	"github.com/krateoplatformops/plumbing/endpoints"
-	"github.com/krateoplatformops/plumbing/http/response"
-	"github.com/krateoplatformops/plumbing/http/util"
-	"github.com/krateoplatformops/plumbing/ptr"
+	xcontext "github.com/krateo-platformops/plumbing/context"
+	"github.com/krateo-platformops/plumbing/endpoints"
+	"github.com/krateo-platformops/plumbing/http/response"
+	"github.com/krateo-platformops/plumbing/http/util"
+	"github.com/krateo-platformops/plumbing/ptr"
 )
 
 const maxUnstructuredResponseTextBytes = 2048

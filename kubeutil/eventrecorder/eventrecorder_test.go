@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/ptr"
+	"github.com/krateo-platformops/plumbing/ptr"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 )

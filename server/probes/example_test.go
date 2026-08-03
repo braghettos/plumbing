@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/server/probes"
+	"github.com/krateo-platformops/plumbing/server/probes"
 )
 
 type okPinger struct{}

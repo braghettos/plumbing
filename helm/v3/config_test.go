@@ -3,7 +3,7 @@ package helm
 import (
 	"testing"
 
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"helm.sh/helm/v3/pkg/action"
 )
 

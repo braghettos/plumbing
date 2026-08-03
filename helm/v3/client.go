@@ -9,9 +9,9 @@ import (
 	"os"
 	"time"
 
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
-	"github.com/krateoplatformops/plumbing/helm/getter/cache"
-	"github.com/krateoplatformops/plumbing/helm/v3/tracer"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
+	"github.com/krateo-platformops/plumbing/helm/getter/cache"
+	"github.com/krateo-platformops/plumbing/helm/v3/tracer"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/storage/driver"

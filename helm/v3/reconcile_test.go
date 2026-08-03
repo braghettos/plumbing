@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

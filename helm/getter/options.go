@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/helm/getter/cache"
+	"github.com/krateo-platformops/plumbing/helm/getter/cache"
 )
 
 type GetOptions struct {

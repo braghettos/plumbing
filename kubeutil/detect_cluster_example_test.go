@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/krateoplatformops/plumbing/kubeutil"
+	"github.com/krateo-platformops/plumbing/kubeutil"
 	"k8s.io/client-go/rest"
 )
 

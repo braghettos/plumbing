@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/cache"
+	"github.com/krateo-platformops/plumbing/cache"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 
-	"github.com/krateoplatformops/plumbing/kubeutil/objectclient"
+	"github.com/krateo-platformops/plumbing/kubeutil/objectclient"
 )
 
 func TestBuildRoleForSecretShape(t *testing.T) {

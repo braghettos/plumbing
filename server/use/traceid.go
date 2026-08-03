@@ -3,8 +3,8 @@ package use
 import (
 	"net/http"
 
-	xcontext "github.com/krateoplatformops/plumbing/context"
-	"github.com/krateoplatformops/plumbing/shortid"
+	xcontext "github.com/krateo-platformops/plumbing/context"
+	"github.com/krateo-platformops/plumbing/shortid"
 )
 
 func TraceId() func(http.Handler) http.Handler {

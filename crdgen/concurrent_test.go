@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/crdgen"
+	"github.com/krateo-platformops/plumbing/crdgen"
 )
 
 func TestConcurrentGenerationSameKindAndGroup(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/http/util"
+	"github.com/krateo-platformops/plumbing/http/util"
 )
 
 func TestRetryOn429(t *testing.T) {

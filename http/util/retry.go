@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/env"
+	"github.com/krateo-platformops/plumbing/env"
 	"golang.org/x/time/rate"
 )
 

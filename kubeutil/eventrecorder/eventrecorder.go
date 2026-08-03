@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/krateoplatformops/plumbing/env"
-	"github.com/krateoplatformops/plumbing/ptr"
+	"github.com/krateo-platformops/plumbing/env"
+	"github.com/krateo-platformops/plumbing/ptr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"

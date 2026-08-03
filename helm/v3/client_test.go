@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	xenv "github.com/krateoplatformops/plumbing/env"
-	helmconfig "github.com/krateoplatformops/plumbing/helm"
+	xenv "github.com/krateo-platformops/plumbing/env"
+	helmconfig "github.com/krateo-platformops/plumbing/helm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"helm.sh/helm/v3/pkg/chart/loader"

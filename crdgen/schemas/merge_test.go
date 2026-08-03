@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/krateoplatformops/plumbing/crdgen/schemas"
+	"github.com/krateo-platformops/plumbing/crdgen/schemas"
 )
 
 func TestAllOfMerge_SecretKeySelector(t *testing.T) {

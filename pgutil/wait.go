@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/krateoplatformops/plumbing/wait"
+	"github.com/krateo-platformops/plumbing/wait"
 )
 
 func WaitForPostgres(ctx context.Context, log *slog.Logger, dbURL string) (*pgxpool.Pool, error) {
