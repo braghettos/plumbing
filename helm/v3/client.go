@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	helmconfig "github.com/krateo-platformops/plumbing/helm"
@@ -16,8 +17,28 @@ import (
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/storage/driver"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 )
+
+// isRESTMappingMiss reports whether err is a "the REST mapper does not know this kind yet" failure —
+// i.e. the object's CRD exists but is not (yet) in the discovery cache. helm surfaces this while
+// building the manifest as a stringified "no matches for kind ... ensure CRDs are installed first" /
+// "resource mapping not found", so a stale discovery cache (e.g. a composition CRD created moments
+// earlier in the same bootstrap) wedges the whole render until the process is restarted. We match both
+// the typed error (when %w-wrapped) and helm's stringified form.
+func isRESTMappingMiss(err error) bool {
+	if err == nil {
+		return false
+	}
+	if meta.IsNoMatchError(err) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "no matches for kind") ||
+		strings.Contains(s, "resource mapping not found") ||
+		strings.Contains(s, "ensure CRDs are installed first")
+}
 
 var _ helmconfig.Client = (*client)(nil)
 
@@ -179,7 +200,19 @@ func (c *client) Install(ctx context.Context, releaseName string, chartRef strin
 		return nil, err
 	}
 
-	return c.install(ctx, namespace, releaseName, chartRef, cfg, actionConfig)
+	rel, err := c.install(ctx, namespace, releaseName, chartRef, cfg, actionConfig)
+	if err != nil && c.cachedClients != nil && isRESTMappingMiss(err) {
+		// A CRD referenced by the chart may have been created moments ago (e.g. a composition CRD
+		// generated earlier in the same bootstrap) and not yet be in the discovery cache, so the render
+		// fails to map its kind. The CRD informer normally invalidates the cache on the CRD add, but that
+		// can race the render; refresh discovery explicitly and retry ONCE — now that the kind is
+		// actually being resolved — so a stale cache no longer wedges the install until a process restart.
+		c.cachedClients.mapper.Reset()
+		if ac2, e2 := c.newActionConfig(ctx, namespace, restCfg, cfg.ActionConfig); e2 == nil {
+			rel, err = c.install(ctx, namespace, releaseName, chartRef, cfg, ac2)
+		}
+	}
+	return rel, err
 }
 
 func (c *client) Upgrade(ctx context.Context, releaseName, chartRef string, cfg *helmconfig.UpgradeConfig) (*helmconfig.Release, error) {
