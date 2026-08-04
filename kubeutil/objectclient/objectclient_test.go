@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 var roleGVR = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}
@@ -124,5 +125,53 @@ func TestClusterScopedWhenNamespaceEmpty(t *testing.T) {
 	}
 	if got.GetName() != "cluster-role" {
 		t.Fatalf("unexpected name %q", got.GetName())
+	}
+}
+
+// TestApplyWritesBackServerResponse is the regression for the core-provider CompositionDefinition
+// "never Ready" digest bug: Apply must REPLACE obj in place with the object the apiserver returned
+// (server defaults / admission mutations applied), on both the create and update paths — so that an
+// apply-then-hash of obj matches a later get-then-hash of the same live object. Before the fix Apply
+// discarded the Create/Update response and left obj as the bare pre-apply render, so the two hashes
+// could never converge.
+func TestApplyWritesBackServerResponse(t *testing.T) {
+	ctx := context.Background()
+
+	// A reactor that mimics the apiserver defaulting a field the caller never set.
+	inject := func(action clienttesting.Action) (bool, runtime.Object, error) {
+		oa, ok := action.(interface{ GetObject() runtime.Object })
+		if !ok {
+			return false, nil, nil
+		}
+		out := oa.GetObject().(*unstructured.Unstructured).DeepCopy()
+		if err := unstructured.SetNestedField(out.Object, "server-default", "spec", "injectedByServer"); err != nil {
+			return true, nil, err
+		}
+		return true, out, nil
+	}
+
+	// CREATE path.
+	dyn := newFakeClient(t)
+	dyn.PrependReactor("create", "roles", inject)
+	obj := newRole("ns1", "my-role")
+	if err := Apply(ctx, dyn, roleGVR, obj, ApplyOptions{}); err != nil {
+		t.Fatalf("Apply (create path): %v", err)
+	}
+	if v, _, _ := unstructured.NestedString(obj.Object, "spec", "injectedByServer"); v != "server-default" {
+		t.Fatalf("create path: obj was not replaced with the server response (spec.injectedByServer=%q)", v)
+	}
+
+	// UPDATE path: seed the object with a plain Apply, then apply again through the injecting reactor.
+	dyn2 := newFakeClient(t)
+	if err := Apply(ctx, dyn2, roleGVR, newRole("ns2", "my-role"), ApplyOptions{}); err != nil {
+		t.Fatalf("seed Apply: %v", err)
+	}
+	dyn2.PrependReactor("update", "roles", inject)
+	obj2 := newRole("ns2", "my-role")
+	if err := Apply(ctx, dyn2, roleGVR, obj2, ApplyOptions{}); err != nil {
+		t.Fatalf("Apply (update path): %v", err)
+	}
+	if v, _, _ := unstructured.NestedString(obj2.Object, "spec", "injectedByServer"); v != "server-default" {
+		t.Fatalf("update path: obj was not replaced with the server response (spec.injectedByServer=%q)", v)
 	}
 }

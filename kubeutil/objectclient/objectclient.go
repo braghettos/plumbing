@@ -52,6 +52,15 @@ type UninstallOptions struct {
 // Apply creates obj if no object with its namespace/name exists yet, or updates it (carrying over the
 // current resourceVersion) if one does. It retries on any transient error other than context
 // cancellation, since the read-then-write is not atomic and can race a concurrent writer.
+//
+// On success obj is REPLACED IN PLACE with the object the apiserver returned — i.e. the fully
+// materialized resource, with server defaults, admission mutations and the new resourceVersion
+// applied (this holds even under DryRun, where the response is the object as it WOULD be persisted).
+// Callers that hash or compare the applied resource against a later live Get must have both sides
+// reflect the same server-defaulted shape; without this write-back Apply would leave obj as the bare
+// pre-apply render, so an apply-then-hash digest could never equal a get-then-hash digest of the same
+// object (core-provider CompositionDefinition Observe deployed-digest gate never converged, so the CD
+// never reached Available).
 func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj *unstructured.Unstructured, opts ApplyOptions) error {
 	res := namespacedOrCluster(dyn, gvr, obj.GetNamespace())
 	name := obj.GetName()
@@ -60,23 +69,31 @@ func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionRe
 		current, err := res.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				_, err := res.Create(ctx, obj, metav1.CreateOptions{
+				created, err := res.Create(ctx, obj, metav1.CreateOptions{
 					DryRun:          opts.DryRun,
 					FieldManager:    opts.FieldManager,
 					FieldValidation: opts.FieldValidation,
 				})
-				return err
+				if err != nil {
+					return err
+				}
+				obj.SetUnstructuredContent(created.UnstructuredContent())
+				return nil
 			}
 			return err
 		}
 
 		obj.SetResourceVersion(current.GetResourceVersion())
-		_, err = res.Update(ctx, obj, metav1.UpdateOptions{
+		updated, err := res.Update(ctx, obj, metav1.UpdateOptions{
 			DryRun:          opts.DryRun,
 			FieldManager:    opts.FieldManager,
 			FieldValidation: opts.FieldValidation,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		obj.SetUnstructuredContent(updated.UnstructuredContent())
+		return nil
 	})
 }
 
