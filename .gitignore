@@ -32,3 +32,6 @@ experiments/**
 **/token.txt
 **/*.crt
 **/*.key
+
+# make test-envtest installs setup-envtest here
+/bin/
