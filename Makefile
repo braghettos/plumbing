@@ -22,7 +22,10 @@ $(LOCALBIN):
 .PHONY: setup-envtest
 setup-envtest: $(SETUP_ENVTEST) ## Install setup-envtest into ./bin.
 $(SETUP_ENVTEST): | $(LOCALBIN)
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	# Pin to the controller-runtime 0.22 line (matches sigs.k8s.io/controller-runtime v0.22.3 in
+	# go.mod). Do NOT use @latest: newer setup-envtest (v0.24+) requires go >= 1.26 and fails under
+	# this module's go 1.25 toolchain (GOTOOLCHAIN=local) with "requires go >= 1.26.0".
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
 
 .PHONY: test-envtest
 test-envtest: setup-envtest ## Run the envtest (real-apiserver) functional cache-staleness tests.
