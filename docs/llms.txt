@@ -1,0 +1,12 @@
+# plumbing — LLM doc index (pinned: v1.13.2)
+# One line per file; regenerate the pin on release.
+docs/index.md: the map of this bundle — what the shared Go library is, links to everything
+docs/overview.md: package design — the helm apply-if-changed Reconcile engine, crdgen, kubeutil, labels, and how core-provider/CDC consume them
+docs/usage.md: go get + the exact-tag version-pinning conventions consumers follow + the bump chain
+docs/configuration.md: the config surface the library itself reads — two env vars, the AUTHN_JWT_SECRET key-name constant, test build tags
+docs/api.md: the exported package map, one line per package, grouped by theme (full godoc on pkg.go.dev)
+docs/examples.md: examples index
+docs/release.md: how a release ships — tag-only Go module (vX.Y.Z git tags, no OCI artifact)
+docs/log.md: curated history, newest first
+examples/minimal/README.md: runnable example — values.schema.json to CRD via crdgen.Generate
+crdgen/docs/ref-resolution-redesign.md: design record of the direct JSON-Schema to structural-OpenAPI-v3 crdgen transpiler
