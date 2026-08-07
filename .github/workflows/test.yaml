@@ -30,3 +30,7 @@ jobs:
 
       - name: Functional cache-staleness tests (envtest)
         run: make test-envtest
+
+  lint-docs:
+    name: lint-docs
+    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main
