@@ -41,7 +41,7 @@ A compilable starting point is [examples/minimal](../examples/minimal/README.md)
 
 - **Pin an exact release tag, never a pseudo-version of `main`.** Every consumer's
   `go.mod` carries `github.com/krateo-platformops/plumbing vX.Y.Z` (core-provider
-  and composition-dynamic-controller both pin `v1.13.2` today). `main` is
+  pins `v1.13.2`, composition-dynamic-controller `v1.13.0` today). `main` is
   release-worthy but unreleased commits are not consumed.
 - **Contract packages must be the SAME version on both sides.** `labels` (and any
   other cross-repo contract) only delivers its compile-time guarantee if
