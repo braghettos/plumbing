@@ -1,6 +1,7 @@
 package jwtutil
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"time"
 
@@ -8,8 +9,6 @@ import (
 )
 
 const (
-	JwtSecretEnvKey = "AUTHN_JWT_SECRET"
-
 	defaultISS = "krateo.io"
 )
 
@@ -27,17 +26,24 @@ type CreateTokenOptions struct {
 	Username   string
 	Groups     []string
 	Duration   time.Duration
-	SigningKey string
+	KeyID      string
+	PrivateKey *rsa.PrivateKey
 }
 
 // CreateToken generates a signed JWT token using the provided
 // username, group list, and expiration duration.
-// The token is signed using the HS256 algorithm.
-// The signing key is read from the environment variable AUTHN_JWT_SECRET.
-// If the environment variable is not set, the function returns an error.
+// The token is signed asymmetrically using the RS256 algorithm and the
+// supplied RSA private key, and carries a "kid" header identifying the key
+// so that JWKS-based validators (e.g. agentgateway) can select the matching
+// public key. The corresponding public key must be published in the JWKS
+// under the same KeyID.
 func CreateToken(opts CreateTokenOptions) (string, error) {
-	if opts.SigningKey == "" {
-		return "", fmt.Errorf("signing key cannot be empty")
+	if opts.PrivateKey == nil {
+		return "", fmt.Errorf("private key cannot be nil")
+	}
+
+	if opts.KeyID == "" {
+		return "", fmt.Errorf("key ID cannot be empty")
 	}
 
 	if opts.Username == "" {
@@ -60,7 +66,8 @@ func CreateToken(opts CreateTokenOptions) (string, error) {
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = opts.KeyID
 
-	return token.SignedString([]byte(opts.SigningKey))
+	return token.SignedString(opts.PrivateKey)
 }

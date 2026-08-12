@@ -16,9 +16,19 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-func UserConfig(signingKey, authnNS string) func(http.Handler) http.Handler {
+// UserConfig builds a middleware that validates the incoming bearer token.
+// keys resolves the RSA public key a token was signed with; in production this
+// is a jwtutil.JWKSKeySource pointed at authn's /.well-known/jwks.json, which
+// fetches and caches the key set so rotating authn's keypair needs no redeploy
+// here.
+func UserConfig(keys jwtutil.KeySource, authnNS string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		fn := func(wri http.ResponseWriter, req *http.Request) {
+			if keys == nil {
+				response.InternalError(wri, fmt.Errorf("no JWT key source configured"))
+				return
+			}
+
 			authHeader := req.Header.Get("Authorization")
 			if authHeader == "" {
 				response.Unauthorized(wri, fmt.Errorf("missing authorization header"))
@@ -31,8 +41,15 @@ func UserConfig(signingKey, authnNS string) func(http.Handler) http.Handler {
 				return
 			}
 
-			userInfo, err := jwtutil.Validate(signingKey, parts[1])
+			userInfo, err := jwtutil.ValidateWithKeySource(keys, parts[1])
 			if err != nil {
+				// The key set being unreachable is our failure, not a bad
+				// credential: answer 503 so the client retries instead of
+				// re-authenticating against an authn that is simply down.
+				if errors.Is(err, jwtutil.ErrKeyUnavailable) {
+					response.ServiceUnavailable(wri, err)
+					return
+				}
 				if errors.Is(err, jwtutil.ErrTokenExpired) {
 					response.Unauthorized(wri, err)
 				} else {

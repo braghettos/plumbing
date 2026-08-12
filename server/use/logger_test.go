@@ -2,6 +2,8 @@ package use
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,11 +35,17 @@ func TestLoggerMiddleware(t *testing.T) {
 
 	route := NewChain(Logger(log)).Then(sillyHandler)
 
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	bearer, err := jwtutil.CreateToken(jwtutil.CreateTokenOptions{
 		Username:   "cyberjoker",
 		Groups:     []string{"devs", "testers"},
 		Duration:   time.Minute * 2,
-		SigningKey: "abbracadabbra",
+		KeyID:      "test-kid",
+		PrivateKey: privateKey,
 	})
 	if err != nil {
 		t.Fatal(err)
