@@ -1,6 +1,8 @@
 package jwtutil_test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 	"time"
 
@@ -9,9 +11,10 @@ import (
 )
 
 func TestExtractUserInfo(t *testing.T) {
-	const (
-		secret = "test-secret"
-	)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	const keyID = "test-key-id"
 
 	tests := []struct {
 		name           string
@@ -26,7 +29,8 @@ func TestExtractUserInfo(t *testing.T) {
 					Username:   "alice",
 					Groups:     []string{"admin", "dev"},
 					Duration:   time.Minute,
-					SigningKey: secret,
+					KeyID:      keyID,
+					PrivateKey: privateKey,
 				})
 				return token
 			},
@@ -42,7 +46,8 @@ func TestExtractUserInfo(t *testing.T) {
 				token, _ := jwtutil.CreateToken(jwtutil.CreateTokenOptions{
 					Groups:     []string{"admin", "dev"},
 					Duration:   time.Minute,
-					SigningKey: secret,
+					KeyID:      keyID,
+					PrivateKey: privateKey,
 				})
 				return token
 			},
@@ -61,7 +66,8 @@ func TestExtractUserInfo(t *testing.T) {
 				token, _ := jwtutil.CreateToken(jwtutil.CreateTokenOptions{
 					Username:   "bob",
 					Duration:   time.Minute,
-					SigningKey: secret,
+					KeyID:      keyID,
+					PrivateKey: privateKey,
 				})
 				return token
 			},

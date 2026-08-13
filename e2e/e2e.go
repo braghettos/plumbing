@@ -33,7 +33,8 @@ func Logger(traceId string) types.StepFunc {
 type SignUpOptions struct {
 	Username   string
 	Groups     []string
-	JWTSignKey string
+	JWTSignKey string // PEM-encoded RSA private key
+	JWTKeyID   string
 	Namespace  string
 	Duration   time.Duration
 }
@@ -44,10 +45,16 @@ func SignUp(opts SignUpOptions) types.StepFunc {
 	}
 
 	return func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		privateKey, err := jwtutil.ParseRSAPrivateKeyFromPEM([]byte(opts.JWTSignKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		accessToken, err := jwtutil.CreateToken(jwtutil.CreateTokenOptions{
 			Username:   opts.Username,
 			Groups:     opts.Groups,
-			SigningKey: opts.JWTSignKey,
+			KeyID:      opts.JWTKeyID,
+			PrivateKey: privateKey,
 			Duration:   opts.Duration,
 		})
 		if err != nil {
