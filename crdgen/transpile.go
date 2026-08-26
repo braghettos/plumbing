@@ -22,8 +22,8 @@ import (
 
 	"github.com/gobuffalo/flect"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextinstall "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -520,7 +520,59 @@ func copyArrayValidation(out *apiextensionsv1.JSONSchemaProps, node *schemas.Typ
 		v := int64(node.MaxItems)
 		out.MaxItems = &v
 	}
-	out.UniqueItems = node.UniqueItems
+	applyUniqueItems(out, node)
+}
+
+// applyUniqueItems translates a JSON-Schema `uniqueItems: true` into a form Kubernetes accepts.
+// A CRD structural schema FORBIDS `uniqueItems: true` outright — the apiserver rejects it because
+// the runtime complexity would be quadratic — so it cannot be passed through. We preserve the
+// intent wherever it is cheaply expressible, matching the transpiler's "emit the k8s-idiomatic
+// equivalent, else degrade with a warning" philosophy:
+//
+//   - scalar items         -> x-kubernetes-list-type: set. The native, apiserver-enforced
+//     uniqueness for scalar lists (O(1) to declare, no cost budget) — the
+//     idiomatic CRD replacement for uniqueItems.
+//   - non-scalar + bounded -> a CEL x-kubernetes-validations uniqueness rule. Uniqueness is
+//     inherently O(n^2) in CEL, so this is only emitted when maxItems bounds
+//     the array — otherwise the CEL cost estimator would reject the rule (the
+//     same quadratic-cost concern the uniqueItems ban exists for).
+//   - otherwise            -> dropped. A working CRD that just does not enforce uniqueness on this
+//     field beats one the apiserver refuses to register.
+//
+// `uniqueItems: false`/unset leaves out.UniqueItems at its false zero value. An explicitly-authored
+// x-kubernetes-list-type is respected (uniqueItems is then redundant or the author's concern).
+func applyUniqueItems(out *apiextensionsv1.JSONSchemaProps, node *schemas.Type) {
+	if !node.UniqueItems {
+		return
+	}
+	if node.XListType != nil {
+		return
+	}
+	if isScalarItems(out) {
+		setType := "set"
+		out.XListType = &setType
+		return
+	}
+	if out.MaxItems != nil {
+		out.XValidations = append(out.XValidations, apiextensionsv1.ValidationRule{
+			Rule:    "self.all(x, self.exists_one(y, y == x))",
+			Message: "Items must be unique",
+		})
+	}
+}
+
+// isScalarItems reports whether an array's items are a single scalar type
+// (string/integer/number/boolean), for which x-kubernetes-list-type: set is valid.
+func isScalarItems(out *apiextensionsv1.JSONSchemaProps) bool {
+	if out.Items == nil || out.Items.Schema == nil {
+		return false
+	}
+	switch out.Items.Schema.Type {
+	case "string", "integer", "number", "boolean":
+		return true
+	default:
+		return false
+	}
 }
 
 // primaryType returns the single structural type and whether the node is nullable
@@ -569,9 +621,9 @@ func mergeConditionedStatus(status *apiextensionsv1.JSONSchemaProps) {
 					Description: "LastTransitionTime is the last time this condition transitioned from one status to another."},
 				"message": {Type: "string",
 					Description: "A Message containing details about this condition's last transition from one status to another, if any."},
-				"reason":  {Type: "string", Description: "A Reason for this condition's last transition from one status to another."},
-				"status":  {Type: "string", Description: "Status of this condition; is it currently True, False, or Unknown?"},
-				"type":    {Type: "string", Description: "Type of this condition. At most one of each condition type may apply to a resource at any point in time."},
+				"reason": {Type: "string", Description: "A Reason for this condition's last transition from one status to another."},
+				"status": {Type: "string", Description: "Status of this condition; is it currently True, False, or Unknown?"},
+				"type":   {Type: "string", Description: "Type of this condition. At most one of each condition type may apply to a resource at any point in time."},
 			},
 		}},
 	}
