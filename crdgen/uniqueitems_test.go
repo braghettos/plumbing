@@ -1,6 +1,8 @@
 package crdgen
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,5 +113,33 @@ func TestUniqueItems_AgentgatewayScopeRegression(t *testing.T) {
 	}
 	if scope.UniqueItems {
 		t.Error("uniqueItems must not be carried into the CRD")
+	}
+}
+
+// The real agentgateway-policies values.schema.json that originally failed with 21 structural
+// "uniqueItems: Forbidden" errors. Its 3 uniqueItems arrays (definitions/contentScope,
+// regexClass/builtins, regexCustomClass/builtins) are all string arrays $ref-ed from many sites;
+// each inlined copy must transpile to a valid CRD (list-type: set), so Generate now succeeds.
+func TestUniqueItems_AgentgatewayPoliciesFixture(t *testing.T) {
+	schema, err := os.ReadFile(filepath.Join("testdata", "agentgateway-policies.values.schema.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	out, err := Generate(Options{
+		Group:        "composition.krateo.io",
+		Version:      "v0-1-0",
+		Kind:         "AgentgatewayPolicies",
+		SpecSchema:   schema,
+		StatusSchema: []byte(defaultStatusSchema),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed on the real agentgateway-policies schema (the reported bug): %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "uniqueItems: true") {
+		t.Error("generated CRD still contains the forbidden `uniqueItems: true`")
+	}
+	if !strings.Contains(s, "x-kubernetes-list-type: set") {
+		t.Error("expected the scope string-arrays to become `x-kubernetes-list-type: set`")
 	}
 }
