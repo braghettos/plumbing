@@ -1,0 +1,1284 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "agentgateway-policies values",
+  "description": "JWT authentication and three-layer RBAC for the Krateo kagent fleet, rendered as agentgateway Gateway/HTTPRoute/AgentgatewayPolicy/AgentgatewayBackend objects. Values double as the Composition spec (a partial override merged over the chart defaults), so no property is schema-required; array items still require their own keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "subjects": {
+      "type": "object",
+      "description": "Who a rule grants access to. The matchers are OR'd; at least one must be set, otherwise the rule would deny everyone. `anyAuthenticated` is IGNORED when `users` or `groups` is set: these blocks are deep-merged maps, so a caller narrowing a rule to a group never sees the default `anyAuthenticated: true` disappear, and OR'ing it back in would silently restore access to everyone. Widen again with `anyAuthenticated: true` and no users/groups.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "anyAuthenticated": {
+          "type": "boolean",
+          "description": "Any request carrying a token this gateway validated. Ignored when `users` or `groups` is set."
+        },
+        "users": {
+          "type": "array",
+          "description": "Values of the user claim (authn: the username in `sub`).",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "groups": {
+          "type": "array",
+          "description": "Values that must appear in the groups claim (authn: `groups`, a list of strings).",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "secretKeyRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A Kubernetes Secret holding one credential. Empty `name` = the credential source is unset.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Secret name, in this release's namespace."
+        },
+        "key": {
+          "type": "string",
+          "description": "Data key to read. Empty = the location's default (`Authorization` for a header credential, `credentials.json` for GCP). A `Bearer ` prefix is stripped only from the default `Authorization` key, so a raw key must name its own data key."
+        }
+      }
+    },
+    "authLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where the credential is written on the outgoing request. Empty = the `Authorization` header with a `Bearer ` prefix. Exactly one of the three when set.",
+      "properties": {
+        "header": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "prefix": {
+              "type": "string",
+              "description": "Prepended to the value, e.g. `Bearer `."
+            }
+          }
+        },
+        "queryParameter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "cookie": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "keyAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An API-key credential. Set `secretRef` (preferred) or `key`; `secretRef` wins if both are given.",
+      "properties": {
+        "secretRef": {
+          "$ref": "#/definitions/secretKeyRef"
+        },
+        "key": {
+          "type": "string",
+          "description": "Inline key. Least secure \u2014 it lands in the Composition spec and in helm's release Secret in cleartext."
+        },
+        "location": {
+          "$ref": "#/definitions/authLocation"
+        }
+      }
+    },
+    "gcpAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Google Cloud credentials. All fields empty = ambient discovery (on GKE, the proxy pod's node SA \u2014 the same path the agents use for Vertex today).",
+      "properties": {
+        "gcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "",
+                "AccessToken",
+                "IdToken"
+              ],
+              "description": "AccessToken for Google APIs; IdToken only for a Cloud Run style upstream."
+            },
+            "secretRef": {
+              "$ref": "#/definitions/secretKeyRef"
+            },
+            "audience": {
+              "type": "string",
+              "description": "Explicit `aud` for an ID token. IdToken only; derived from the backend hostname when empty."
+            }
+          }
+        }
+      }
+    },
+    "awsAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AWS credentials for SigV4 signing. An empty `secretRef.name` means the default AWS credential chain (IRSA, instance profile, environment).",
+      "properties": {
+        "aws": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Secret with `accessKey`, `secretKey` and optionally `sessionToken`."
+                }
+              }
+            },
+            "assumeRole": {
+              "type": "object",
+              "description": "STS AssumeRole settings, passed through verbatim. Mutually exclusive with secretRef."
+            },
+            "region": {
+              "type": "string",
+              "description": "SigV4 signing region, when the target service is not in the gateway's region."
+            },
+            "serviceName": {
+              "type": "string",
+              "description": "SigV4 service name. Typed AWS backends supply this themselves."
+            }
+          }
+        }
+      }
+    },
+    "backendHttp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "HTTP settings for the connection the gateway opens to this backend.",
+      "properties": {
+        "requestTimeout": {
+          "type": "string",
+          "description": "Response deadline, e.g. `5s`. Empty = no chart-set deadline. A short one on the MODEL hop turns a long generation into a 504; on a guardrail hop it is protection against a hung dependency."
+        }
+      }
+    },
+    "guardMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the client is told when this guard rejects. Both empty = the gateway's own default text and 403.",
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "Response body returned instead of the model's answer."
+        },
+        "statusCode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 599,
+          "description": "HTTP status. 0 = unset (the gateway uses 403)."
+        }
+      }
+    },
+    "applySides": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which directions this layer runs in. Each direction is a separate guard entry and counts against the 8-per-direction ceiling.",
+      "properties": {
+        "request": {
+          "type": "boolean",
+          "description": "Inspect the prompt on its way to the provider."
+        },
+        "response": {
+          "type": "boolean",
+          "description": "Inspect the model's answer on its way back."
+        }
+      }
+    },
+    "contentScope": {
+      "type": "array",
+      "description": "Which parts of the payload the guard inspects. Empty = the default, SystemPrompt + Messages. ToolInput/ToolOutput also cover tool arguments and tool results \u2014 valuable on this fleet, whose tools return live cluster state, but masking inside opaque tool-argument JSON can rewrite it into invalid JSON.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "SystemPrompt",
+          "Messages",
+          "ToolInput",
+          "ToolOutput"
+        ]
+      },
+      "uniqueItems": true,
+      "maxItems": 4
+    },
+    "regexSide": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How this class behaves in one direction.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Render a guard entry for this direction."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "Mask",
+            "Reject"
+          ],
+          "description": "Mask redacts the match and lets the exchange continue; Reject ends it with the message below. `Mask` is NOT applied to a streamed response \u2014 matched content already in flight passes through unmodified and nothing is recorded, so use Reject to protect a stream."
+        },
+        "message": {
+          "type": "string",
+          "description": "Rejection body. Ignored by a Mask action."
+        },
+        "statusCode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 599,
+          "description": "Rejection status. 0 = the gateway's default 403."
+        }
+      }
+    },
+    "regexClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One regex class: a set of patterns plus what to do with a match in each direction. A class with no `matches` and no `builtins` renders nothing \u2014 a guard matching nothing reads like protection and is not.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Master switch for the class, both directions."
+        },
+        "builtins": {
+          "type": "array",
+          "description": "agentgateway's own PII recognizers, which validate by pattern AND checksum rather than by keyword.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "CreditCard",
+              "Ssn",
+              "Email",
+              "PhoneNumber",
+              "CaSin"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "matches": {
+          "type": "array",
+          "description": "Rust regex patterns. Additive with `builtins`.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "$ref": "#/definitions/contentScope"
+        },
+        "request": {
+          "$ref": "#/definitions/regexSide"
+        },
+        "response": {
+          "$ref": "#/definitions/regexSide"
+        }
+      }
+    },
+    "regexCustomClass": {
+      "type": "object",
+      "description": "A class of your own, in the same shape as the built-in ones.",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Labels the class in render-time failures and in the folded-guard name. Not sent to the gateway."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "builtins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "CreditCard",
+              "Ssn",
+              "Email",
+              "PhoneNumber",
+              "CaSin"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scope": {
+          "$ref": "#/definitions/contentScope"
+        },
+        "request": {
+          "$ref": "#/definitions/regexSide"
+        },
+        "response": {
+          "$ref": "#/definitions/regexSide"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Helm global values (injected by the composition runtime)."
+    },
+    "gatewayClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The GatewayClass the Gateway below names. The controller that reconciles it is a separate release (chart agentgateway-controller).",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Render the GatewayClass. false = one of this name already exists; it is cluster-scoped, so only one release may own it."
+        },
+        "controllerName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must equal the agentgateway controller's own name, or the class is never reconciled."
+        }
+      }
+    },
+    "nameOverride": {
+      "type": "string",
+      "description": "Override the chart-derived object name prefix."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Override the full object name prefix."
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Render the Gateway. false = attach to a Gateway someone else owns."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Gateway name; also the name of the proxy Service the controller provisions, i.e. the host in the kagent controller's proxy.url."
+        },
+        "gatewayClassName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GatewayClass the agentgateway controller reconciles."
+        },
+        "listenerName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Listener name; every route attaches to it by sectionName."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "allowedRoutesFrom": {
+          "type": "string",
+          "enum": [
+            "Same",
+            "All",
+            "Selector"
+          ],
+          "description": "Which namespaces may attach routes to this Gateway."
+        }
+      }
+    },
+    "kagent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agentNamespace": {
+          "type": "string",
+          "description": "Namespace of the Agent CRs \u2014 the <namespace> segment of /api/a2a/<namespace>/<agent>/. Empty = release namespace."
+        },
+        "controller": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "service": {
+              "type": "string",
+              "minLength": 1,
+              "description": "kagent controller Service; it serves every agent's A2A endpoint."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    },
+    "jwt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Render the JWT authentication policy and the token-passthrough policy."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "Strict",
+            "Optional",
+            "Permissive"
+          ],
+          "description": "Strict = no token is a 401, and each sub-agent route gets its own route-scoped Optional policy so the tokenless agent-card fetch still lands. Optional = one Gateway-wide policy; anonymous traffic is denied by authorization with a 403. Permissive never rejects and should not be used."
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must equal the token's iss claim (authn: krateo.io)."
+        },
+        "audiences": {
+          "type": "array",
+          "description": "Allowed aud values. MUST stay empty for authn, which emits no aud claim.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "userClaim": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Claim carrying the user identity (authn: sub)."
+        },
+        "groupsClaim": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Claim carrying the group list (authn: groups)."
+        },
+        "jwks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "service": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Service publishing the JWKS (authn)."
+            },
+            "namespace": {
+              "type": "string",
+              "description": "Its namespace. Empty = release namespace; anything else also renders a ReferenceGrant."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "JWKS path on that Service."
+            },
+            "cacheDuration": {
+              "type": "string",
+              "pattern": "^([0-9]{1,5}(h|m|s|ms)){1,4}$",
+              "description": "How long a fetched JWKS is reused. agentgateway rejects anything below 5m."
+            }
+          }
+        }
+      }
+    },
+    "cors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "CORS for the gateway. Only needed when a BROWSER calls it directly (the Krateo portal's Autopilot rail does): the browser sends an unauthenticated OPTIONS preflight first, which the authorization policy would 403, and refuses the real request unless the answer carries Access-Control-Allow-*. Short-circuits the preflight ONLY \u2014 a real request with no/bad token is still 403/401. Server-to-server callers are unaffected. The Krateo installer enables it with features.agentGateway.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Origins allowed to call the gateway from a browser. Defaults to '*' because the portal's browser-facing origin is not knowable in-cluster; pin it to the real portal origin when you know it. Safe by default only while allowCredentials is false \u2014 the credential is a Bearer header the page must set itself, not a cookie.",
+          "default": [
+            "*"
+          ]
+        },
+        "allowMethods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "GET",
+            "POST",
+            "OPTIONS"
+          ]
+        },
+        "allowHeaders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "Authorization",
+            "Content-Type"
+          ]
+        },
+        "allowCredentials": {
+          "type": "boolean",
+          "description": "Leave false: no cookies are involved, and true alongside allowOrigins ['*'] is rejected by browsers.",
+          "default": false
+        },
+        "maxAge": {
+          "type": "integer",
+          "description": "Seconds a browser may cache the preflight answer.",
+          "default": 300
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Render the Gateway-level Allow policy carrying layers 1 and 3. false leaves the gateway authenticating without authorizing."
+        }
+      }
+    },
+    "endpointRules": {
+      "type": "array",
+      "description": "Layer 1 \u2014 which subjects may reach which agent's A2A endpoint directly.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agents",
+          "subjects"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Agent names, or [\"*\"] for the whole /api/a2a/<ns>/ prefix.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "subjects": {
+            "$ref": "#/definitions/subjects"
+          }
+        }
+      }
+    },
+    "mcpTraffic": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Traffic-layer gate for the proxied /mcp hop. Which tool may run is mcpServers[].toolRules.",
+      "properties": {
+        "subjects": {
+          "$ref": "#/definitions/subjects"
+        }
+      }
+    },
+    "sessionTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Allows the portal's Evidence panel to read a session's stored activity (GET /api/sessions/...). Read-only.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "subjects": {
+          "$ref": "#/definitions/subjects"
+        }
+      }
+    },
+    "mcpServers": {
+      "type": "array",
+      "description": "In-cluster MCP servers to front. Each entry renders an AgentgatewayBackend + route (required once the kagent controller proxies agent egress) and its per-tool rules. External MCP servers are not proxied and must not be listed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "port"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Service name, which is also the x-kagent-host value (<service>.<namespace>)."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "MCP endpoint path on the server. Default /mcp."
+          },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "StreamableHTTP",
+              "SSE"
+            ],
+            "description": "MCP transport. Default StreamableHTTP."
+          },
+          "toolRules": {
+            "type": "array",
+            "description": "Layer 2 \u2014 each entry restricts the named tools to the given subjects. Rules are AND'd into one expression, so a rule can only narrow access. Tools named nowhere stay open.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tools",
+                "subjects"
+              ],
+              "properties": {
+                "tools": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "subjects": {
+                  "$ref": "#/definitions/subjects"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "subAgents": {
+      "type": "array",
+      "description": "Layer 3 \u2014 every agent that can be an A2A delegation target. Each entry renders the header-matched route, the token passthrough, the anonymous agent-card allowance and the delegation rule.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "subjects"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Agent name, which is also its Service name and the x-kagent-host value."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "The agent's A2A port. Default 8080."
+          },
+          "subjects": {
+            "$ref": "#/definitions/subjects"
+          }
+        }
+      }
+    },
+    "extraAllowExpressions": {
+      "type": "array",
+      "description": "Extra CEL expressions appended verbatim to the Gateway Allow policy. OR'd with the generated ones, so they can only widen access.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The LLM hop: the AI backend the agents' model calls resolve to, and the OpenAI-compatible route they arrive on. INFRASTRUCTURE rather than a guardrail detail \u2014 once the calls arrive here every `backend.ai` policy agentgateway has becomes available on them, and guardrails are only the first consumer (rate limits and token budgets, cost controls, model aliases, failover across providers, prompt enrichment and per-model RBAC all attach to this same route). Disabling it hands the hop back: the route disappears and the agents go straight to the provider.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Render the AI backend, the LLM route and its authorization clause. false = an LLM route already exists on this Gateway (someone else's AgentgatewayBackend): point `guardrails.targetRefs` at it instead."
+        },
+        "routePrefix": {
+          "type": "string",
+          "pattern": "^/.*",
+          "minLength": 1,
+          "description": "Path prefix of the rendered route, and therefore the `openAI.baseUrl` every agent gets: http://<gateway.name>.<namespace>.svc.cluster.local:<gateway.port><routePrefix>. Deliberately not a bare `/v1`: this Gateway also carries /api/a2a/\u2026, /mcp and the header-matched `/` sub-agent routes. kagent appends `/chat/completions`, so the full path still ends in `/v1/chat/completions` and agentgateway's route-type detection matches it."
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "gemini",
+            "vertexai",
+            "openai",
+            "anthropic",
+            "bedrock",
+            "custom"
+          ],
+          "description": "Which upstream the backend talks to. `auto` resolves to `vertexai` when vertexai.projectId is set, else `gemini` \u2014 mirroring how every agent chart already chooses (the installer fills projectId/region from its own vertexAI block)."
+        },
+        "gemini": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Gemini API key path. The secret is the same one the agents use today (autopilot: geminiApiKey.secretName/secretKey) \u2014 the gateway simply becomes the thing that holds it.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Empty = the model id from the request wins, i.e. whatever the ModelConfig asked for. Setting it PINS every agent to one model regardless of its ModelConfig."
+            },
+            "auth": {
+              "$ref": "#/definitions/keyAuth"
+            }
+          }
+        },
+        "vertexai": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Vertex AI path. Leave `auth.gcp.secretRef` empty to use ambient credentials; off GKE, point it at a service-account key JSON (installer: vertexAI.secretName/secretKey).",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "description": "GCP project hosting Vertex AI. Required for this provider."
+            },
+            "region": {
+              "type": "string",
+              "description": "`global` routes across regions instead of pinning one Dynamic Shared Quota pool; `us`/`eu` are restricted multi-region endpoints; anything else is a regional location."
+            },
+            "model": {
+              "type": "string",
+              "description": "Model override. Empty = from the request."
+            },
+            "auth": {
+              "$ref": "#/definitions/gcpAuth"
+            }
+          }
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OpenAI. Both fields as for gemini.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model override. Empty = from the request."
+            },
+            "auth": {
+              "$ref": "#/definitions/keyAuth"
+            }
+          }
+        },
+        "anthropic": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Anthropic. Both fields as for gemini.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model override. Empty = from the request."
+            },
+            "auth": {
+              "$ref": "#/definitions/keyAuth"
+            }
+          }
+        },
+        "bedrock": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "AWS Bedrock as the model provider (distinct from `bedrockGuardrails`, which is a guardrail service and can front any provider).",
+          "properties": {
+            "region": {
+              "type": "string",
+              "description": "Bedrock region."
+            },
+            "model": {
+              "type": "string",
+              "description": "Model override. Empty = from the request."
+            },
+            "auth": {
+              "$ref": "#/definitions/awsAuth"
+            }
+          }
+        },
+        "custom": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A self-hosted or non-managed OpenAI-compatible upstream (vLLM, Ollama behind a Service, a corporate LLM proxy). Give it EITHER `backendRef` OR `host`+`port` \u2014 agentgateway rejects both together \u2014 and at least one format.",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model override. Empty = from the request."
+            },
+            "host": {
+              "type": "string",
+              "description": "External hostname. Mutually exclusive with backendRef."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "Port for `host`."
+            },
+            "backendRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "An in-cluster Service or InferencePool in this namespace.",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "Service",
+                    "InferencePool"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            },
+            "formats": {
+              "type": "array",
+              "minItems": 1,
+              "description": "Which wire protocols the upstream speaks. Completions is the OpenAI-compatible /chat/completions API, which is what kagent sends.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "Completions",
+                      "Messages",
+                      "Responses",
+                      "Embeddings",
+                      "AnthropicTokenCount",
+                      "Realtime",
+                      "Rerank"
+                    ]
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "Upstream path override for this format. Empty = the format's default."
+                  }
+                }
+              }
+            },
+            "auth": {
+              "$ref": "#/definitions/keyAuth"
+            }
+          }
+        },
+        "http": {
+          "$ref": "#/definitions/backendHttp",
+          "description": "Connection tuning for the hop from the gateway to the provider. A model call is slow by nature \u2014 leave requestTimeout empty unless you have a reason."
+        },
+        "callerAuth": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Who may use the LLM route \u2014 the traffic-layer gate for this hop, the analogue of `mcpTraffic` for the MCP hop. It matters more than it looks: the gateway is browser-reachable in the Krateo portal's exposure model, so an ungated LLM route is an open, credentialed proxy to your provider account.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "Jwt",
+                "ApiKey",
+                "Anonymous"
+              ],
+              "description": "Jwt \u2014 kagent's `apiKeyPassthrough` forwards the CALLER's authn token as the LLM credential, the Gateway JWT policy validates it, and `subjects` decides who may spend tokens; a turn with no caller token (an unauthenticated webhook trigger, a cron) has nothing to forward and is denied. ApiKey \u2014 a shared key from a Secret, validated on the route; pick this for callers that are not user-driven. Anonymous \u2014 path-only allow, safe ONLY when this Gateway is unreachable from outside the cluster."
+            },
+            "subjects": {
+              "$ref": "#/definitions/subjects",
+              "description": "Jwt mode: who may spend provider tokens. Same matcher shape as every other rule in this chart."
+            },
+            "apiKey": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "ApiKey mode.",
+              "properties": {
+                "secretRef": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Secret whose every data entry is one accepted key (a bare string, or a JSON object with `key`/`keyHash`/`metadata`)."
+                    }
+                  }
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "Strict",
+                    "Optional",
+                    "Permissive"
+                  ],
+                  "description": "Strict = no key or a bad key is 401. Optional and Permissive exist for migrations; both let keyless requests reach the authorization layer."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "guardrails": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Content guardrails on the LLM traffic: PII and secret masking, company-data redaction, prompt-injection blocking, and the external moderation services. An agentgateway prompt guard is a `backend.ai` policy and only runs on a route whose backend declares `spec.ai.provider` \u2014 that route is the top-level `llm` block; these policies attach to it. Disabling this removes every guard and leaves the route in place, so the traffic keeps flowing through the gateway, just unguarded.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "The master switch for the CONTENT filtering. false = no guardrail policy at all; the `llm` route and anything else attached to it is untouched. To take the gateway out of the LLM path entirely, set `llm.enabled: false`."
+        },
+        "streaming": {
+          "type": "string",
+          "enum": [
+            "",
+            "Disabled",
+            "Enabled"
+          ],
+          "description": "Run the guards on STREAMED responses too. Disabled upstream by default to protect streaming throughput; Enabled here because kagent streams and response guards would otherwise never run. Note the asymmetry: a streamed response can be REJECTED but not MASKED \u2014 matched content is already in flight, so a Mask response guard passes it through unmodified and records nothing. Request guards are unaffected (a request is always buffered)."
+        },
+        "regex": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Layer 1 \u2014 deterministic, sub-millisecond, no external dependency. Each class renders at most two guard entries (one per direction), evaluated in the order listed here.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch for the whole regex layer."
+            },
+            "combine": {
+              "type": "string",
+              "enum": [
+                "WhenNeeded",
+                "Never",
+                "Always"
+              ],
+              "description": "agentgateway allows at most 8 guards per direction, and the full set here (7 default regex classes + moderation + Model Armor + Bedrock + webhook) is 11. WhenNeeded (the default) keeps one entry per class while the total fits and folds every same-action, same-scope class into one entry once it would exceed 8. Never always keeps them separate and fails the render with an actionable message instead. Always folds unconditionally \u2014 cheapest on slots, and the rejection message stops naming which class fired."
+            },
+            "pii": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Actual PII values \u2014 not the words for them. Masked rather than rejected on purpose: an operator pasting a log line with a customer email should get an answer with the email redacted, not a 403 they work around by retyping."
+            },
+            "secrets": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Credentials heading out of the platform. Masked on the request (a pasted manifest with a token still gets a useful answer) and rejected on the response, because a model echoing a live credential back is a leak worth surfacing \u2014 and on a streamed response Reject is the only action that bites."
+            },
+            "companyData": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Company-confidential data. Everything here is organisation-specific by nature, so treat the defaults as a starting shape and add your own classification markers, internal domains and id formats."
+            },
+            "promptInjection": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Attempts to override the system instructions. Rejected, not masked: masking would strip the words and hand the model a mutilated prompt."
+            },
+            "jailbreak": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Persona jailbreaks \u2014 DAN, \"developer mode\", role hijacking. Worth its own class on this fleet: the agents hold real cluster credentials, so an unconstrained persona is a privilege problem, not just a content one."
+            },
+            "systemPromptLeak": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Attempts to read back an agent's own system prompt. On this fleet those prompts encode the platform's grounding rules and tool policy, so they are configuration, not content."
+            },
+            "encodingEvasion": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Encoded payloads and injected chat-template delimiters \u2014 the standard way past a pattern-matching filter, which is exactly what this layer is."
+            },
+            "harmfulContent": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Weapons, drug synthesis, malware, phishing. OFF by default, and not because it does not matter: these patterns match the vocabulary of legitimate platform engineering (\"how to exploit CVE-\u2026\", \"generate a payload\", \"hack into the test cluster\"). Turn it on for a tenant-facing deployment, or use moderation / Model Armor, which judge intent instead of words."
+            },
+            "selfHarmAndHate": {
+              "$ref": "#/definitions/regexClass",
+              "description": "Self-harm, hate speech, and requests for individual medical or financial decisions. OFF for the same reason as harmfulContent, but shipped so a tenant-facing install can switch it on without writing the patterns."
+            },
+            "custom": {
+              "type": "array",
+              "description": "Your own classes. A LIST, so an override replaces it wholesale rather than deep-merging \u2014 which is what you want for \"these are my organisation's patterns\".",
+              "items": {
+                "$ref": "#/definitions/regexCustomClass"
+              }
+            }
+          }
+        },
+        "openAIModeration": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Layer 2 \u2014 the OpenAI Moderations endpoint: ML judgement of intent across hate, harassment, self-harm, sexual and violent content, which regex cannot do. REQUEST path only; the response-side guard type has no moderation form. Costs a network round trip (50-200ms) on every LLM call.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "model": {
+              "type": "string",
+              "description": "Moderation model, e.g. `omni-moderation-latest`."
+            },
+            "auth": {
+              "$ref": "#/definitions/keyAuth"
+            },
+            "http": {
+              "$ref": "#/definitions/backendHttp"
+            },
+            "request": {
+              "$ref": "#/definitions/guardMessage"
+            }
+          }
+        },
+        "googleModelArmor": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Layer 2 \u2014 Google Cloud Model Armor. Sanitizes against a template you manage in GCP, so the policy itself lives outside this chart: security owns the template, the platform owns the wiring.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "templateId": {
+              "type": "string",
+              "description": "Template id from the Model Armor console."
+            },
+            "projectId": {
+              "type": "string",
+              "description": "Project the template lives in."
+            },
+            "location": {
+              "type": "string",
+              "description": "Region the template was created in. A Model Armor template is REGIONAL, and the wrong region is a 404 at request time, not at install time."
+            },
+            "auth": {
+              "$ref": "#/definitions/gcpAuth"
+            },
+            "http": {
+              "$ref": "#/definitions/backendHttp"
+            },
+            "apply": {
+              "$ref": "#/definitions/applySides"
+            },
+            "request": {
+              "$ref": "#/definitions/guardMessage"
+            },
+            "response": {
+              "$ref": "#/definitions/guardMessage"
+            }
+          }
+        },
+        "bedrockGuardrails": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Layer 2 \u2014 AWS Bedrock Guardrails, usable in front of any provider (not only a Bedrock model). The one external layer that also honours `scope`, so it can inspect tool arguments and tool results as well as the prompt.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "identifier": {
+              "type": "string",
+              "description": "Guardrail id from the Bedrock console."
+            },
+            "version": {
+              "type": "string",
+              "description": "Published guardrail version, or DRAFT. A string, not a number \u2014 the API takes it as one."
+            },
+            "region": {
+              "type": "string",
+              "description": "Region the guardrail lives in."
+            },
+            "auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "AWS SigV4 (`aws`) for the real service, or an API key for a Bedrock-compatible endpoint behind a gateway.",
+              "properties": {
+                "aws": {
+                  "$ref": "#/definitions/awsAuth/properties/aws"
+                },
+                "secretRef": {
+                  "$ref": "#/definitions/secretKeyRef"
+                },
+                "key": {
+                  "type": "string",
+                  "description": "Inline key. Least secure."
+                },
+                "location": {
+                  "$ref": "#/definitions/authLocation"
+                }
+              }
+            },
+            "http": {
+              "$ref": "#/definitions/backendHttp"
+            },
+            "scope": {
+              "$ref": "#/definitions/contentScope"
+            },
+            "apply": {
+              "$ref": "#/definitions/applySides"
+            },
+            "request": {
+              "$ref": "#/definitions/guardMessage"
+            },
+            "response": {
+              "$ref": "#/definitions/guardMessage"
+            }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Layer 3 \u2014 your own guardrail server. This chart ships none on purpose: the point of the layer is that the logic is yours (a DLP tool you already run, an NER model, a compliance service). Deploy a server that speaks the Guardrail Webhook API \u2014 POST /request and POST /response, answering pass, mask or reject \u2014 and name it here.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "backendRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The webhook server. A Service, or an agentgateway.dev/AgentgatewayBackend for anything off-cluster.",
+              "properties": {
+                "group": {
+                  "type": "string",
+                  "description": "Empty = the core API group (Service)."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "Service or AgentgatewayBackend."
+                },
+                "name": {
+                  "type": "string"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Empty = this release's namespace. A different one also needs a ReferenceGrant."
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "CEL-computed headers on the outgoing webhook call, evaluated against the ORIGINAL client request \u2014 so `jwt.sub` carries the caller's identity through to your server. The `:path` pseudo-header overrides the default /request and /response paths, and its value is a CEL expression, so a literal path needs inner quotes: '\"/api/guardrails/request\"'."
+            },
+            "forwardHeaderMatches": {
+              "type": "array",
+              "description": "Which of the client's own headers to forward. None by default. Gateway API HTTPHeaderMatch entries, passed through verbatim.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "failureMode": {
+              "type": "string",
+              "enum": [
+                "FailClosed",
+                "FailOpen"
+              ],
+              "description": "What happens when your server is down or errors. FailClosed (the default) is the safe choice and the expensive one: your webhook becomes a hard dependency of every LLM turn. FailOpen lets the exchange through unguarded."
+            },
+            "apply": {
+              "$ref": "#/definitions/applySides"
+            },
+            "request": {
+              "$ref": "#/definitions/guardMessage"
+            },
+            "response": {
+              "$ref": "#/definitions/guardMessage"
+            }
+          }
+        },
+        "extraRequestGuards": {
+          "type": "array",
+          "description": "Guard entries appended verbatim to `promptGuard.request`, for a shape these values cannot express. They count against the 8-per-direction ceiling.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "extraResponseGuards": {
+          "type": "array",
+          "description": "Guard entries appended verbatim to `promptGuard.response`. Same caveat.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "targetRefs": {
+          "type": "array",
+          "description": "What the guardrail policy attaches to. Empty = the route the top-level `llm` block renders, which is the only route on this Gateway carrying LLM traffic. Set it to attach the same guards to an HTTPRoute or AgentgatewayBackend someone else owns (and then usually `llm.enabled: false`). The API group is filled in from the kind.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "name"
+            ],
+            "properties": {
+              "group": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "Gateway",
+                  "HTTPRoute",
+                  "GRPCRoute",
+                  "ListenerSet",
+                  "AgentgatewayBackend",
+                  "InferencePool"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sectionName": {
+                "type": "string",
+                "description": "A named LLM provider inside a multi-provider AgentgatewayBackend."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
