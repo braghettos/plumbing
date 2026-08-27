@@ -2,6 +2,7 @@ package jqutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -56,6 +57,22 @@ func (e *encoder) encode(v any) error {
 		e.w.Write(strconv.AppendInt(e.buf[:0], int64(v), 10))
 	case float64:
 		e.encodeFloat64(v)
+	case json.Number:
+		// json.Number is a valid value type that reaches the encoder whenever the data came from a
+		// JSON decode configured with UseNumber() — e.g. InferType (jqutil/infer.go) or a gojq build
+		// whose `fromjson` preserves json.Number — rather than gojq's normalized int/float64. Without
+		// this case such a value (top-level or nested — encode recurses through maps/arrays) hits
+		// `default` and PANICS mid-encode; net/http then recovers per-connection and closes the socket
+		// with no bytes written, surfacing downstream as an empty reply / "Failed to fetch". The text a
+		// json.Number holds is already valid JSON number syntax, so emit it verbatim — that also
+		// preserves integer precision and the original formatting a float64 round-trip would lose. (An
+		// empty Number — never produced by a real decode — degrades to null rather than writing
+		// invalid JSON.)
+		if s := v.String(); s != "" {
+			e.w.WriteString(s)
+		} else {
+			e.w.Write([]byte("null"))
+		}
 	case *big.Int:
 		e.w.Write(v.Append(e.buf[:0], 10))
 	case string:
