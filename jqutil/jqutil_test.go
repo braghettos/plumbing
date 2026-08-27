@@ -43,6 +43,22 @@ func TestEval(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// #27 end-to-end sanity: a fromjson-parsed schema object with nested + top-level
+			// numbers (the real payload was a values.schema.json with nodePort.maximum = 32767)
+			// round-trips through Eval. NOTE: with the pinned gojq (v0.12.17) fromjson yields
+			// int/float64 and gojq also normalizes json.Number in its input, so json.Number does
+			// not reach the encoder via this path in this version — the deterministic guard for the
+			// panic is TestEncoder_encodeJSONNumber, which encodes json.Number directly. This case
+			// pins the observable round-trip so a future gojq bump that surfaces json.Number here is
+			// covered by the encoder fix rather than regressing to an empty reply.
+			name:    "fromjson-parsed object with nested numbers round-trips",
+			query:   "fromjson",
+			unquote: false,
+			data:    `{"nodePort":{"maximum":32767},"ratio":1.5,"replicas":3}`,
+			want:    `{"nodePort":{"maximum":32767},"ratio":1.5,"replicas":3}`,
+			wantErr: false,
+		},
+		{
 			name:    "Extract from simple list",
 			query:   "[.items[] | .name] | sort",
 			unquote: false,

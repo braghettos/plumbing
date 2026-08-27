@@ -24,20 +24,7 @@ func InferType(value string) any {
 
 	var jsonVal any
 	if err := decoder.Decode(&jsonVal); err == nil {
-		switch v := jsonVal.(type) {
-		case json.Number:
-			if i, err := v.Int64(); err == nil {
-				if i >= math.MinInt32 && i <= math.MaxInt32 {
-					return int32(i)
-				}
-				return i
-			}
-			if f, err := v.Float64(); err == nil {
-				return f
-			}
-		default:
-			return jsonVal
-		}
+		return normalizeNumbers(jsonVal)
 	}
 
 	if strings.EqualFold(value, "true") {
@@ -68,4 +55,44 @@ func InferType(value string) any {
 	}
 
 	return value
+}
+
+// normalizeNumbers converts every json.Number in a value decoded by a UseNumber() decoder to a
+// concrete Go numeric type, recursing into objects and arrays. InferType previously normalized only
+// a TOP-LEVEL scalar number and returned nested numbers as json.Number; those leaked to callers and
+// — when re-encoded by jqutil's encoder — panicked (see jqutil/encoder.go). Doing the conversion in
+// one recursive place makes top-level and nested numbers behave identically.
+func normalizeNumbers(v any) any {
+	switch v := v.(type) {
+	case json.Number:
+		return numberToGo(v)
+	case map[string]any:
+		for k, val := range v {
+			v[k] = normalizeNumbers(val)
+		}
+		return v
+	case []any:
+		for i, val := range v {
+			v[i] = normalizeNumbers(val)
+		}
+		return v
+	default:
+		return v
+	}
+}
+
+// numberToGo converts a json.Number to int32 (when it fits), int64, or float64, matching the type
+// selection InferType uses for a bare scalar number. A Number that parses as neither (never produced
+// by a valid JSON decode) degrades to its literal string.
+func numberToGo(n json.Number) any {
+	if i, err := n.Int64(); err == nil {
+		if i >= math.MinInt32 && i <= math.MaxInt32 {
+			return int32(i)
+		}
+		return i
+	}
+	if f, err := n.Float64(); err == nil {
+		return f
+	}
+	return n.String()
 }
