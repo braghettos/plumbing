@@ -17,6 +17,7 @@ type DiskCache struct {
 	cleanupInterval time.Duration
 	mu              sync.RWMutex
 	stopCh          chan struct{} // Channel to signal the cleanup routine to stop
+	stopOnce        sync.Once     // Makes Stop idempotent — see Stop
 }
 
 // Option defines the functional pattern for configuration.
@@ -140,9 +141,19 @@ func (c *DiskCache) Set(uri, version string, source io.Reader) error {
 	return os.Rename(tmpPath, finalPath)
 }
 
-// Stop halts the background cleanup goroutine to prevent leaks.
+// Stop halts the background cleanup goroutine to prevent leaks. It is idempotent and safe to call
+// concurrently: a bare close(c.stopCh) panics with "close of closed channel" on the second call,
+// which turned a harmless double-cleanup into a process crash. Stop is reached from the helm
+// client's Close(), and callers legitimately end up invoking that more than once — a deferred close
+// on a client variable that was reassigned, a Close in both an error path and a defer, or two
+// goroutines shutting down together. Failing loudly there punished correct cleanup, so callers were
+// discouraged from closing at all, which is how the cleanup goroutine leaked in the first place
+// (krateo-platformops/core-provider#99). TTLCache already guards its stop channel this way; this
+// makes DiskCache consistent with it.
 func (c *DiskCache) Stop() {
-	close(c.stopCh)
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // Clear removes all cached files.
